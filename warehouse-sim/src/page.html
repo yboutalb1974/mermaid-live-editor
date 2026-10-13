@@ -42,14 +42,31 @@
     <div class="workbench">
       <div class="canvas-col">
         <div class="toolbar">
-          <div class="seg" role="group" aria-label="Strumento">
-            <button type="button" data-tool="select" class="active">Seleziona / sposta</button>
-            <button type="button" data-tool="add">Aggiungi scaffale</button>
-            <button type="button" data-tool="start">Posa partenza</button>
-            <button type="button" data-tool="end">Posa arrivo</button>
+          <div class="seg view-seg" id="view-toggle" role="group" aria-label="Vista">
+            <button type="button" data-view="2d" class="active">2D</button>
+            <button type="button" data-view="3d">3D</button>
+          </div>
+          <div class="tool-group" id="tools-2d">
+            <div class="seg" id="tool-seg" role="group" aria-label="Strumento">
+              <button type="button" data-tool="select" class="active">Seleziona / sposta</button>
+              <button type="button" data-tool="add">Aggiungi scaffale</button>
+              <button type="button" data-tool="start">Posa partenza</button>
+              <button type="button" data-tool="end">Posa arrivo</button>
+            </div>
+            <label class="check"><input type="checkbox" id="chk-labels" checked /> Codici</label>
+          </div>
+          <div class="tool-group" id="tools-3d" hidden>
+            <div class="seg" role="group" aria-label="Inquadratura">
+              <button type="button" data-preset="iso">Prospettiva</button>
+              <button type="button" data-preset="top">Dall'alto</button>
+              <button type="button" data-preset="front">Frontale</button>
+            </div>
+            <span class="hint"
+              >Trascina per ruotare · Shift o tasto destro per spostare · rotella o due dita per lo
+              zoom · clic su uno scaffale per selezionarlo</span
+            >
           </div>
           <label class="check"><input type="checkbox" id="chk-heat" /> Mappa di calore</label>
-          <label class="check"><input type="checkbox" id="chk-labels" checked /> Codici</label>
         </div>
         <div class="map-wrap" id="map-wrap"></div>
         <div class="legend">

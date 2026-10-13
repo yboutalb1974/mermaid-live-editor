@@ -909,3 +909,37 @@ pre.code {
     animation: none !important;
   }
 }
+
+/* 3D view */
+.tool-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  min-width: 0;
+}
+.view-seg button {
+  min-width: 44px;
+  font-weight: 700;
+}
+.map-wrap.view-3d {
+  padding: 0;
+  overflow: hidden;
+}
+.view3d-canvas {
+  display: block;
+  width: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+.view3d-canvas:active {
+  cursor: grabbing;
+}
+.v3d-msg {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}

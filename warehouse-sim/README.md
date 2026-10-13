@@ -11,6 +11,10 @@ la simulazione viene eseguita subito.
 1. **Layout**: pianta su griglia da 1 m. Trascina gli scaffali, aggiungine, posa partenza e arrivo, oppure usa il
    generatore di scaffalature (corridoi verticali od orizzontali, corridoio di fondo, corridoio trasversale).
    "Variante slotting ABC" crea una copia con gli SKU più richiesti sulle ubicazioni più vicine.
+   Il pulsante **3D** mostra il layout in tre dimensioni (altezza scaffali e livelli impostabili), con percorso
+   campione e mappa di calore; si ruota trascinando e si seleziona uno scaffale con un clic. È solo una vista:
+   i calcoli restano a terra. Il motore 3D (three.js) si scarica da cdnjs alla prima apertura, quindi serve
+   internet; il resto funziona offline.
 2. **Domanda e ordini**: catalogo SKU con pesi di frequenza (classi ABC calcolate) e import CSV; import di
    ordini storici (`OrderID;SKU;Qty`) per simulare con le combinazioni reali di SKU.
 3. **Parametri**: numero ordini, righe per ordine, velocità, tempi per riga e per pezzo, batch (più ordini per
@@ -28,6 +32,7 @@ Il progetto si salva automaticamente nel browser; "Esporta progetto" produce un 
 warehouse-sim/
   src/engine.js        motore di simulazione (funzioni pure, nessun DOM)
   src/app.js           interfaccia
+  src/view3d.js        vista 3D (three.js caricato su richiesta)
   src/styles.css       stile
   src/page.html        struttura della pagina
   build.mjs            unisce tutto in un unico file HTML

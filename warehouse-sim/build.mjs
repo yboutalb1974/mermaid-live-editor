@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(fileURLToPath(import.meta.url));
 const read = (f) => readFileSync(join(root, 'src', f), 'utf8');
 
-const engine = read('engine.js').replace(/^export (?=(function|const|let|class)\b)/gm, '');
-const app = read('app.js').replace(/^import \{[\s\S]*?\} from '\.\/engine\.js';\n/m, '');
-if (/^import /m.test(app) || /^export /m.test(engine))
+const stripExports = (code) => code.replace(/^export (?=(function|const|let|class)\b)/gm, '');
+const engine = stripExports(read('engine.js'));
+const view3d = stripExports(read('view3d.js'));
+const app = read('app.js').replace(/^import \{[\s\S]*?\} from '\.\/[a-z0-9]+\.js';\n/gm, '');
+if (/^import /m.test(app) || /^export /m.test(engine + view3d))
   throw new Error('Unexpected module syntax left after bundling.');
 
-const script = `(() => {\n'use strict';\n${engine}\n${app}\n})();`;
+const script = `(() => {\n'use strict';\n${engine}\n${view3d}\n${app}\n})();`;
 if (script.includes('</script')) throw new Error('Script contains a closing script tag.');
 
 const fragment = read('page.html')

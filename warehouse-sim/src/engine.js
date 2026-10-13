@@ -922,6 +922,8 @@ export function sampleProject() {
   const width = 36;
   const depth = 30;
   const base = {
+    rackHeight: 3,
+    levels: 4,
     width,
     depth,
     start: { x: 1, y: 1 },
@@ -982,6 +984,8 @@ export function emptyLayout(name = 'Nuovo layout') {
     name,
     width: 30,
     depth: 24,
+    rackHeight: 3,
+    levels: 4,
     start: { x: 1, y: 1 },
     sameEnd: true,
     end: { x: 1, y: 1 },

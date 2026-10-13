@@ -20,6 +20,7 @@ import {
   simulate,
   uid
 } from './engine.js';
+import { createView3D, loadThree } from './view3d.js';
 
 const STORAGE_KEY = 'pickpathlab.project.v1';
 
@@ -66,7 +67,9 @@ const state = {
   heat: false,
   labels: true,
   visitsLayout: null,
-  anim: null
+  anim: null,
+  view: '2d',
+  v3d: null
 };
 
 const active = () =>
@@ -302,7 +305,17 @@ function renderGeometry() {
       ${numField('Arrivo Y (m)', 'ey', L.end.y, 'data-g="end.y" min="0" step="1"')}
     </div>`
     }
-    <p class="hint">Coordinate in metri dall'angolo in alto a sinistra. Puoi anche posare partenza e arrivo cliccando sulla pianta.</p>`;
+    <p class="hint">Coordinate in metri dall'angolo in alto a sinistra. Puoi anche posare partenza e arrivo cliccando sulla pianta.</p>
+    <div class="grid">
+      ${numField(
+        'Altezza scaffali (m)',
+        'rh',
+        L.rackHeight ?? 3,
+        'data-g="rackHeight" min="0.5" max="40" step="0.5"'
+      )}
+      ${numField('Livelli', 'lv', L.levels ?? 4, 'data-g="levels" min="1" max="20" step="1"')}
+    </div>
+    <p class="hint">Altezza e livelli servono solo alla vista 3D: il modello calcola il prelievo a terra.</p>`;
 }
 
 function onGeometryChange(e) {
@@ -313,6 +326,16 @@ function onGeometryChange(e) {
   else if (key === 'sameEnd') {
     L.sameEnd = e.target.checked;
     if (!L.sameEnd) L.end = { ...L.start };
+  } else if (key === 'rackHeight') {
+    L.rackHeight = Math.min(40, Math.max(0.5, toNum(e.target.value, 3)));
+    renderMap();
+    save();
+    return;
+  } else if (key === 'levels') {
+    L.levels = Math.min(20, Math.max(1, Math.round(toNum(e.target.value, 4))));
+    renderMap();
+    save();
+    return;
   } else {
     const v = Math.round(toNum(e.target.value));
     if (key === 'width' || key === 'depth') L[key] = Math.min(300, Math.max(4, v));
@@ -483,6 +506,61 @@ function routeCells(prep, seq) {
   return out;
 }
 
+// Cells and stop cells of the selected sample route on the active layout, or null.
+function sampleRoute(res) {
+  const prep = res ? currentPrep() : null;
+  const r = res && prep ? res.routes[state.routeIdx] : null;
+  if (!r) return null;
+  return { cells: routeCells(prep, r.seq), stops: r.seq.map((n) => prep.cells[n]) };
+}
+
+function renderMap3D(L, res, maxVisits) {
+  const wrap = $('#map-wrap');
+  wrap.className = 'map-wrap view-3d';
+  if (!window.THREE) {
+    wrap.innerHTML = '<div class="v3d-msg">Caricamento vista 3D…</div>';
+    loadThree()
+      .then(() => state.view === '3d' && renderMap())
+      .catch((err) => {
+        wrap.innerHTML = `<div class="v3d-msg">${esc(
+          err.message
+        )} La vista 2D funziona comunque.</div>`;
+      });
+    return;
+  }
+  if (!state.v3d || !wrap.contains(state.v3d.canvas)) {
+    wrap.innerHTML = '';
+    try {
+      state.v3d = createView3D(wrap, {
+        onPick: (id) => {
+          state.selected = id;
+          renderMap();
+          renderInspector();
+        }
+      });
+    } catch {
+      state.v3d = null;
+      wrap.innerHTML =
+        '<div class="v3d-msg">Questo browser non supporta la grafica 3D (WebGL). Usa la vista 2D.</div>';
+      return;
+    }
+  }
+  let heat = null;
+  if (state.heat && res && maxVisits > 0) {
+    heat = {};
+    for (const loc of L.locations) heat[loc.id] = (res.visits[loc.id] || 0) / maxVisits;
+  }
+  const route = sampleRoute(res);
+  state.routeCells = route ? route.cells : null;
+  state.v3d.update({
+    layout: L,
+    selected: state.selected,
+    heat,
+    routeCells: route?.cells || null,
+    stops: route?.stops || []
+  });
+}
+
 function renderMap() {
   const L = active();
   const W = L.width;
@@ -492,6 +570,11 @@ function renderMap() {
   let maxVisits = 0;
   if (state.heat && res)
     for (const v of Object.values(res.visits)) maxVisits = Math.max(maxVisits, v);
+  if (state.view === '3d') return renderMap3D(L, res, maxVisits);
+  if (state.v3d) {
+    state.v3d.destroy();
+    state.v3d = null;
+  }
 
   let grid = '';
   if (W * H <= 40000) {
@@ -910,8 +993,9 @@ function playRoute() {
     return;
   }
   const cells = state.routeCells;
-  const walker = $('#walker');
-  if (!cells || !walker || cells.length < 2) return;
+  const in3d = state.view === '3d' && state.v3d;
+  const walker = in3d ? null : $('#walker');
+  if (!cells || cells.length < 2 || (!in3d && !walker)) return;
   const cellsPerSec = 14;
   const t0 = performance.now();
   const step = (now) => {
@@ -919,8 +1003,13 @@ function playRoute() {
     const i = Math.min(cells.length - 1, Math.floor(pos));
     const j = Math.min(cells.length - 1, i + 1);
     const f = pos - i;
-    walker.setAttribute('cx', cells[i].x + 0.5 + (cells[j].x - cells[i].x) * f);
-    walker.setAttribute('cy', cells[i].y + 0.5 + (cells[j].y - cells[i].y) * f);
+    const px = cells[i].x + 0.5 + (cells[j].x - cells[i].x) * f;
+    const py = cells[i].y + 0.5 + (cells[j].y - cells[i].y) * f;
+    if (in3d) state.v3d.setWalker(px, py);
+    else {
+      walker.setAttribute('cx', px);
+      walker.setAttribute('cy', py);
+    }
     if (pos < cells.length - 1) state.anim = requestAnimationFrame(step);
     else {
       state.anim = null;
@@ -1797,13 +1886,29 @@ function wire() {
   });
 
   // Toolbar
-  document.querySelector('.seg').addEventListener('click', (e) => {
+  $('#tool-seg').addEventListener('click', (e) => {
     const b = e.target.closest('[data-tool]');
     if (!b) return;
     state.tool = b.dataset.tool;
-    for (const x of document.querySelectorAll('.seg [data-tool]'))
+    for (const x of document.querySelectorAll('#tool-seg [data-tool]'))
       x.classList.toggle('active', x === b);
     $('#map-wrap').className = 'map-wrap tool-' + state.tool;
+  });
+  $('#view-toggle').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-view]');
+    if (!b || b.dataset.view === state.view) return;
+    stopAnim();
+    state.view = b.dataset.view;
+    for (const x of document.querySelectorAll('#view-toggle [data-view]'))
+      x.classList.toggle('active', x === b);
+    $('#tools-2d').hidden = state.view === '3d';
+    $('#tools-3d').hidden = state.view !== '3d';
+    renderMap();
+    renderRouteBar();
+  });
+  $('#tools-3d').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-preset]');
+    if (b && state.v3d) state.v3d.preset(b.dataset.preset);
   });
   $('#chk-heat').addEventListener('change', (e) => {
     state.heat = e.target.checked;
