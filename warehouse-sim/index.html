@@ -12,10 +12,11 @@
   rel="stylesheet"
   href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" />
 <style>
-  /* Layout concept: a working bench — floor plan on the left, inspector on the right, steps across the top.
+  /* Light-only by design: the page stays white whatever the system theme.
+   Layout concept: a working bench — floor plan on the left, inspector on the right, steps across the top.
    Palette comes from the warehouse floor: concrete neutrals, steel-blue racking, safety-yellow marking. */
 :root {
-  --bg: #eef1ef;
+  --bg: #ffffff;
   --surface: #ffffff;
   --surface-2: #f5f7f5;
   --ink: #172022;
@@ -40,52 +41,7 @@
   --font-data: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
 
   --r: 6px;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg: #0f1516;
-    --surface: #172022;
-    --surface-2: #1c2729;
-    --ink: #e3eae7;
-    --muted: #93a29f;
-    --line: #2c393b;
-    --steel: #6ea6c8;
-    --steel-soft: #20374a;
-    --floor: #1b2a24;
-    --floor-line: #24372d;
-    --accent: #f2c230;
-    --accent-ink: #1d1a0e;
-    --route: #ff7f50;
-    --good: #5cc28a;
-    --bad: #f07167;
-    --warn: #e0a83a;
-    --heat-lo: #5b5222;
-    --heat-hi: #ff5a3c;
-    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 16px rgb(0 0 0 / 25%);
-    color-scheme: dark;
-  }
-}
-:root[data-theme='dark'] {
-  --bg: #0f1516;
-  --surface: #172022;
-  --surface-2: #1c2729;
-  --ink: #e3eae7;
-  --muted: #93a29f;
-  --line: #2c393b;
-  --steel: #6ea6c8;
-  --steel-soft: #20374a;
-  --floor: #1b2a24;
-  --floor-line: #24372d;
-  --accent: #f2c230;
-  --accent-ink: #1d1a0e;
-  --route: #ff7f50;
-  --good: #5cc28a;
-  --bad: #f07167;
-  --warn: #e0a83a;
-  --heat-lo: #5b5222;
-  --heat-hi: #ff5a3c;
-  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 16px rgb(0 0 0 / 25%);
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * {
