@@ -574,6 +574,15 @@ export function runLayout(prep, orders, s, keepRoutes = 25) {
   const costPerOrder = hoursPerOrder * s.hourlyCost;
   const pickerHoursDay = hoursPerOrder * s.dailyOrders;
 
+  // Hot zone: the 20 % of locations with the shortest round trip from start to end.
+  const hot = hotZone(prep);
+  let hotVisits = 0;
+  let allVisits = 0;
+  for (const [id, v] of visits) {
+    allVisits += v;
+    if (hot.has(id)) hotVisits += v;
+  }
+
   return {
     layoutId: prep.layout.id,
     name: prep.layout.name,
@@ -596,8 +605,21 @@ export function runLayout(prep, orders, s, keepRoutes = 25) {
     totalLines,
     visits: Object.fromEntries(visits),
     units: Object.fromEntries(units),
+    hotShare: allVisits ? (100 * hotVisits) / allVisits : 0,
     routes
   };
+}
+
+const roundTrip = (prep, node) => prep.D[node] + prep.D[node * prep.n + 1];
+
+// Location ids in the hot zone: the closest 20 % by round trip start -> location -> end.
+export function hotZone(prep, share = 0.2) {
+  const costs = [];
+  for (const [id, node] of prep.nodeOfLoc) {
+    if (prep.D[node] >= 0) costs.push([id, roundTrip(prep, node)]);
+  }
+  costs.sort((a, b) => a[1] - b[1] || naturalCompare(a[0], b[0]));
+  return new Set(costs.slice(0, Math.max(1, Math.ceil(costs.length * share))).map((c) => c[0]));
 }
 
 export function improvement(base, value) {
@@ -737,6 +759,185 @@ export function autoSlot(layout, demand) {
   for (const l of out.locations) l.stock = [];
   entries.forEach((e, i) => byId.get(slots[i].locId).stock.push(e));
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Move plan: which relocations deliver the saving                     */
+/* ------------------------------------------------------------------ */
+
+// True when two layouts share footprint, start and every location's geometry: only the stock differs.
+export function sameFootprint(a, b) {
+  if (a.width !== b.width || a.depth !== b.depth) return false;
+  if (a.locations.length !== b.locations.length) return false;
+  if (a.start.x !== b.start.x || a.start.y !== b.start.y || !a.sameEnd !== !b.sameEnd) return false;
+  const byId = new Map(a.locations.map((l) => [l.id, l]));
+  return b.locations.every((l) => {
+    const o = byId.get(l.id);
+    return o && o.x === l.x && o.y === l.y && o.w === l.w && o.d === l.d && o.face === l.face;
+  });
+}
+
+// Turns "go from `base` to `variant`" into an ordered list of swaps, best first.
+// Each step moves one SKU facing to a location it holds in `variant`; the occupant that does
+// not belong there takes the freed location. Steps are chosen greedily on the net effect of
+// both SKUs (share of order lines × change in round trip of the nearest facing), recomputed
+// after every swap, so early steps never push a fast mover out of the way.
+// `saving` is metres of round trip per 1,000 order lines: an index to rank moves. The
+// simulated curve (moveCurve) is the measure of the real effect.
+export function movePlan(base, variant, demand) {
+  if (!sameFootprint(base, variant)) {
+    return {
+      error:
+        'Il piano confronta due layout con le stesse ubicazioni: qui cambia anche la geometria.'
+    };
+  }
+  const prep = prepareLayout(base);
+  const cost = new Map();
+  for (const [id, node] of prep.nodeOfLoc) {
+    cost.set(id, prep.D[node] >= 0 ? roundTrip(prep, node) : Infinity);
+  }
+  const total = demand.reduce((a, d) => a + (d.weight > 0 ? d.weight : 0), 0);
+  const w = new Map(demand.map((d) => [d.sku, total > 0 && d.weight > 0 ? d.weight / total : 0]));
+  const abc = abcClasses(demand);
+
+  // Working state: location -> list of SKUs, SKU -> set of locations.
+  const at = new Map(base.locations.map((l) => [l.id, (l.stock || []).map((s) => s.sku)]));
+  const where = new Map();
+  for (const [id, list] of at) {
+    for (const sku of list) {
+      if (!where.has(sku)) where.set(sku, new Set());
+      where.get(sku).add(id);
+    }
+  }
+  const target = new Map();
+  for (const l of variant.locations) {
+    for (const s of l.stock || []) {
+      if (!target.has(s.sku)) target.set(s.sku, new Set());
+      target.get(s.sku).add(l.id);
+    }
+  }
+  const best = (set) => {
+    let m = Infinity;
+    for (const id of set || []) m = Math.min(m, cost.get(id) ?? Infinity);
+    return m;
+  };
+  const after = (set, remove, add) => {
+    const n = new Set(set || []);
+    if (remove) n.delete(remove);
+    if (add) n.add(add);
+    return best(n);
+  };
+
+  const steps = [];
+  for (let guard = 0; guard < 100000; guard++) {
+    let pick = null;
+    for (const [sku, want] of target) {
+      const have = where.get(sku);
+      if (!have) continue;
+      for (const t of want) {
+        if (have.has(t)) continue;
+        // Free the facing of this SKU that is not wanted and is farthest away.
+        let src = null;
+        for (const id of have) {
+          if (!want.has(id) && (!src || cost.get(id) > cost.get(src))) src = id;
+        }
+        if (!src) continue;
+        const occ = (at.get(t) || []).find((o) => !target.get(o)?.has(t)) ?? null;
+        let net = (w.get(sku) || 0) * (best(have) - after(have, src, t));
+        if (occ) net += (w.get(occ) || 0) * (best(where.get(occ)) - after(where.get(occ), t, src));
+        if (!Number.isFinite(net)) net = 0;
+        if (!pick || net > pick.net + 1e-12) pick = { sku, src, t, occ, net };
+      }
+    }
+    if (!pick) break;
+    const { sku, src, t, occ } = pick;
+    at.get(src).splice(at.get(src).indexOf(sku), 1);
+    where.get(sku).delete(src);
+    if (occ) {
+      at.get(t).splice(at.get(t).indexOf(occ), 1);
+      where.get(occ).delete(t);
+      at.get(src).push(occ);
+      where.get(occ).add(src);
+    }
+    at.get(t).push(sku);
+    where.get(sku).add(t);
+    steps.push({
+      sku,
+      cls: abc[sku] || 'C',
+      from: src,
+      to: t,
+      displaced: occ,
+      saving: pick.net * 1000
+    });
+  }
+
+  const net = steps.reduce((a, m) => a + m.saving, 0);
+  let cum = 0;
+  for (const m of steps) {
+    cum += m.saving;
+    m.cumShare = net > 0 ? cum / net : 0;
+  }
+  const vById = new Map(variant.locations.map((l) => [l.id, l]));
+  const content = (l) =>
+    (l?.stock || [])
+      .map((x) => x.sku)
+      .sort()
+      .join('|');
+  const changedLocations = base.locations.filter(
+    (l) => content(l) !== content(vById.get(l.id))
+  ).length;
+  return { moves: steps, netSaving: net, changedLocations };
+}
+
+// Replays the first steps of a move plan on `base` and returns the new layout.
+export function applyMoves(base, steps, name) {
+  const out = clone(base);
+  out.id = uid('layout');
+  out.name = name;
+  const byId = new Map(out.locations.map((l) => [l.id, l]));
+  for (const m of steps) {
+    const src = byId.get(m.from);
+    const dst = byId.get(m.to);
+    const i = src.stock.findIndex((s) => s.sku === m.sku);
+    if (i < 0) continue;
+    const entry = src.stock.splice(i, 1)[0];
+    if (m.displaced) {
+      const j = dst.stock.findIndex((s) => s.sku === m.displaced);
+      if (j >= 0) src.stock.push(dst.stock.splice(j, 1)[0]);
+    }
+    dst.stock.push(entry);
+  }
+  return out;
+}
+
+// Measures, by simulation, how much of the full saving the first k moves deliver.
+// Uses the same orders for every point (a sample of up to `sample` orders).
+export function moveCurve(project, base, variant, plan, sample = 1500) {
+  const s = { ...DEFAULT_SETTINGS, ...project.settings };
+  let orders =
+    s.source === 'history' && project.history?.length
+      ? project.history.slice(0, sample)
+      : generateOrders(project.demand, { ...s, orders: Math.min(s.orders, sample) });
+  const n = plan.moves.length;
+  const ks = [0];
+  for (let k = 1; k < n; k = Math.max(k + 1, Math.round(k * 1.6))) ks.push(k);
+  ks.push(n);
+  const points = ks.map((k) => {
+    const L = applyMoves(base, plan.moves.slice(0, k), 'k');
+    const r = runLayout(prepareLayout(L), orders, s, 0);
+    return { k, distance: r.avgDistance, time: r.avgTime };
+  });
+  const t0 = points[0].time;
+  const tN = points[points.length - 1].time;
+  for (const p of points) p.share = t0 - tN > 1e-9 ? (t0 - p.time) / (t0 - tN) : 0;
+  const first = (q) => points.find((p) => p.share >= q - 1e-9)?.k ?? n;
+  return {
+    points,
+    k80: first(0.8),
+    k90: first(0.9),
+    orders: orders.length,
+    fullGain: improvement(t0, tN)
+  };
 }
 
 /* ------------------------------------------------------------------ */

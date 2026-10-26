@@ -958,6 +958,66 @@ pre.code {
   color: var(--muted);
 }
 
+/* Colour modes and SKU search */
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+.inline-field span {
+  color: var(--muted);
+  font-weight: 600;
+}
+.inline-field select {
+  width: auto;
+}
+.find {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.find input {
+  width: 150px;
+}
+.color-note {
+  margin-top: -4px;
+}
+svg .rack.found {
+  stroke: var(--route);
+  stroke-width: 0.3;
+}
+.sw-found {
+  border: 2px solid var(--route);
+  background: transparent;
+}
+.plan-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+}
+.chart .curve {
+  fill: none;
+  stroke: var(--steel);
+  stroke-width: 2.5;
+}
+.chart .curve-area {
+  fill: var(--steel-soft);
+  opacity: 0.6;
+}
+.chart .dot {
+  fill: var(--steel);
+}
+.chart .dot.hit {
+  fill: var(--accent);
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+.chart .ref {
+  stroke: var(--muted);
+  stroke-dasharray: 4 4;
+}
+
 </style>
 
 <div class="app">
@@ -1018,8 +1078,27 @@ pre.code {
               zoom · clic su uno scaffale per selezionarlo</span
             >
           </div>
-          <label class="check"><input type="checkbox" id="chk-heat" /> Mappa di calore</label>
+          <label class="inline-field" for="color-mode"
+            ><span>Colora per</span>
+            <select id="color-mode">
+              <option value="none">Nessuno</option>
+              <option value="visits">Visite (mappa di calore)</option>
+              <option value="abc">Classe ABC</option>
+              <option value="moves">Spostamenti vs baseline</option>
+            </select></label
+          >
+          <form class="find" id="find-form" role="search">
+            <input
+              type="search"
+              id="find-sku"
+              list="sku-find-list"
+              placeholder="Trova SKU"
+              aria-label="Trova SKU" />
+            <datalist id="sku-find-list"></datalist>
+            <button type="submit" class="btn small">Trova</button>
+          </form>
         </div>
+        <p class="hint color-note" id="color-note" hidden></p>
         <div class="map-wrap" id="map-wrap"></div>
         <div class="legend">
           <span><i class="sw sw-rack"></i>Ubicazione</span>
@@ -1027,7 +1106,7 @@ pre.code {
           <span><i class="sw sw-start"></i>Partenza</span>
           <span><i class="sw sw-end"></i>Arrivo</span>
           <span><i class="sw sw-route"></i>Percorso</span>
-          <span><i class="sw sw-heat"></i>Calore: visite per giro</span>
+          <span><i class="sw sw-found"></i>SKU trovato</span>
         </div>
         <div class="route-bar" id="route-bar"></div>
         <ul class="issues" id="layout-issues"></ul>
@@ -1702,6 +1781,15 @@ function runLayout(prep, orders, s, keepRoutes = 25) {
   const costPerOrder = hoursPerOrder * s.hourlyCost;
   const pickerHoursDay = hoursPerOrder * s.dailyOrders;
 
+  // Hot zone: the 20 % of locations with the shortest round trip from start to end.
+  const hot = hotZone(prep);
+  let hotVisits = 0;
+  let allVisits = 0;
+  for (const [id, v] of visits) {
+    allVisits += v;
+    if (hot.has(id)) hotVisits += v;
+  }
+
   return {
     layoutId: prep.layout.id,
     name: prep.layout.name,
@@ -1724,8 +1812,21 @@ function runLayout(prep, orders, s, keepRoutes = 25) {
     totalLines,
     visits: Object.fromEntries(visits),
     units: Object.fromEntries(units),
+    hotShare: allVisits ? (100 * hotVisits) / allVisits : 0,
     routes
   };
+}
+
+const roundTrip = (prep, node) => prep.D[node] + prep.D[node * prep.n + 1];
+
+// Location ids in the hot zone: the closest 20 % by round trip start -> location -> end.
+function hotZone(prep, share = 0.2) {
+  const costs = [];
+  for (const [id, node] of prep.nodeOfLoc) {
+    if (prep.D[node] >= 0) costs.push([id, roundTrip(prep, node)]);
+  }
+  costs.sort((a, b) => a[1] - b[1] || naturalCompare(a[0], b[0]));
+  return new Set(costs.slice(0, Math.max(1, Math.ceil(costs.length * share))).map((c) => c[0]));
 }
 
 function improvement(base, value) {
@@ -1865,6 +1966,185 @@ function autoSlot(layout, demand) {
   for (const l of out.locations) l.stock = [];
   entries.forEach((e, i) => byId.get(slots[i].locId).stock.push(e));
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Move plan: which relocations deliver the saving                     */
+/* ------------------------------------------------------------------ */
+
+// True when two layouts share footprint, start and every location's geometry: only the stock differs.
+function sameFootprint(a, b) {
+  if (a.width !== b.width || a.depth !== b.depth) return false;
+  if (a.locations.length !== b.locations.length) return false;
+  if (a.start.x !== b.start.x || a.start.y !== b.start.y || !a.sameEnd !== !b.sameEnd) return false;
+  const byId = new Map(a.locations.map((l) => [l.id, l]));
+  return b.locations.every((l) => {
+    const o = byId.get(l.id);
+    return o && o.x === l.x && o.y === l.y && o.w === l.w && o.d === l.d && o.face === l.face;
+  });
+}
+
+// Turns "go from `base` to `variant`" into an ordered list of swaps, best first.
+// Each step moves one SKU facing to a location it holds in `variant`; the occupant that does
+// not belong there takes the freed location. Steps are chosen greedily on the net effect of
+// both SKUs (share of order lines × change in round trip of the nearest facing), recomputed
+// after every swap, so early steps never push a fast mover out of the way.
+// `saving` is metres of round trip per 1,000 order lines: an index to rank moves. The
+// simulated curve (moveCurve) is the measure of the real effect.
+function movePlan(base, variant, demand) {
+  if (!sameFootprint(base, variant)) {
+    return {
+      error:
+        'Il piano confronta due layout con le stesse ubicazioni: qui cambia anche la geometria.'
+    };
+  }
+  const prep = prepareLayout(base);
+  const cost = new Map();
+  for (const [id, node] of prep.nodeOfLoc) {
+    cost.set(id, prep.D[node] >= 0 ? roundTrip(prep, node) : Infinity);
+  }
+  const total = demand.reduce((a, d) => a + (d.weight > 0 ? d.weight : 0), 0);
+  const w = new Map(demand.map((d) => [d.sku, total > 0 && d.weight > 0 ? d.weight / total : 0]));
+  const abc = abcClasses(demand);
+
+  // Working state: location -> list of SKUs, SKU -> set of locations.
+  const at = new Map(base.locations.map((l) => [l.id, (l.stock || []).map((s) => s.sku)]));
+  const where = new Map();
+  for (const [id, list] of at) {
+    for (const sku of list) {
+      if (!where.has(sku)) where.set(sku, new Set());
+      where.get(sku).add(id);
+    }
+  }
+  const target = new Map();
+  for (const l of variant.locations) {
+    for (const s of l.stock || []) {
+      if (!target.has(s.sku)) target.set(s.sku, new Set());
+      target.get(s.sku).add(l.id);
+    }
+  }
+  const best = (set) => {
+    let m = Infinity;
+    for (const id of set || []) m = Math.min(m, cost.get(id) ?? Infinity);
+    return m;
+  };
+  const after = (set, remove, add) => {
+    const n = new Set(set || []);
+    if (remove) n.delete(remove);
+    if (add) n.add(add);
+    return best(n);
+  };
+
+  const steps = [];
+  for (let guard = 0; guard < 100000; guard++) {
+    let pick = null;
+    for (const [sku, want] of target) {
+      const have = where.get(sku);
+      if (!have) continue;
+      for (const t of want) {
+        if (have.has(t)) continue;
+        // Free the facing of this SKU that is not wanted and is farthest away.
+        let src = null;
+        for (const id of have) {
+          if (!want.has(id) && (!src || cost.get(id) > cost.get(src))) src = id;
+        }
+        if (!src) continue;
+        const occ = (at.get(t) || []).find((o) => !target.get(o)?.has(t)) ?? null;
+        let net = (w.get(sku) || 0) * (best(have) - after(have, src, t));
+        if (occ) net += (w.get(occ) || 0) * (best(where.get(occ)) - after(where.get(occ), t, src));
+        if (!Number.isFinite(net)) net = 0;
+        if (!pick || net > pick.net + 1e-12) pick = { sku, src, t, occ, net };
+      }
+    }
+    if (!pick) break;
+    const { sku, src, t, occ } = pick;
+    at.get(src).splice(at.get(src).indexOf(sku), 1);
+    where.get(sku).delete(src);
+    if (occ) {
+      at.get(t).splice(at.get(t).indexOf(occ), 1);
+      where.get(occ).delete(t);
+      at.get(src).push(occ);
+      where.get(occ).add(src);
+    }
+    at.get(t).push(sku);
+    where.get(sku).add(t);
+    steps.push({
+      sku,
+      cls: abc[sku] || 'C',
+      from: src,
+      to: t,
+      displaced: occ,
+      saving: pick.net * 1000
+    });
+  }
+
+  const net = steps.reduce((a, m) => a + m.saving, 0);
+  let cum = 0;
+  for (const m of steps) {
+    cum += m.saving;
+    m.cumShare = net > 0 ? cum / net : 0;
+  }
+  const vById = new Map(variant.locations.map((l) => [l.id, l]));
+  const content = (l) =>
+    (l?.stock || [])
+      .map((x) => x.sku)
+      .sort()
+      .join('|');
+  const changedLocations = base.locations.filter(
+    (l) => content(l) !== content(vById.get(l.id))
+  ).length;
+  return { moves: steps, netSaving: net, changedLocations };
+}
+
+// Replays the first steps of a move plan on `base` and returns the new layout.
+function applyMoves(base, steps, name) {
+  const out = clone(base);
+  out.id = uid('layout');
+  out.name = name;
+  const byId = new Map(out.locations.map((l) => [l.id, l]));
+  for (const m of steps) {
+    const src = byId.get(m.from);
+    const dst = byId.get(m.to);
+    const i = src.stock.findIndex((s) => s.sku === m.sku);
+    if (i < 0) continue;
+    const entry = src.stock.splice(i, 1)[0];
+    if (m.displaced) {
+      const j = dst.stock.findIndex((s) => s.sku === m.displaced);
+      if (j >= 0) src.stock.push(dst.stock.splice(j, 1)[0]);
+    }
+    dst.stock.push(entry);
+  }
+  return out;
+}
+
+// Measures, by simulation, how much of the full saving the first k moves deliver.
+// Uses the same orders for every point (a sample of up to `sample` orders).
+function moveCurve(project, base, variant, plan, sample = 1500) {
+  const s = { ...DEFAULT_SETTINGS, ...project.settings };
+  let orders =
+    s.source === 'history' && project.history?.length
+      ? project.history.slice(0, sample)
+      : generateOrders(project.demand, { ...s, orders: Math.min(s.orders, sample) });
+  const n = plan.moves.length;
+  const ks = [0];
+  for (let k = 1; k < n; k = Math.max(k + 1, Math.round(k * 1.6))) ks.push(k);
+  ks.push(n);
+  const points = ks.map((k) => {
+    const L = applyMoves(base, plan.moves.slice(0, k), 'k');
+    const r = runLayout(prepareLayout(L), orders, s, 0);
+    return { k, distance: r.avgDistance, time: r.avgTime };
+  });
+  const t0 = points[0].time;
+  const tN = points[points.length - 1].time;
+  for (const p of points) p.share = t0 - tN > 1e-9 ? (t0 - p.time) / (t0 - tN) : 0;
+  const first = (q) => points.find((p) => p.share >= q - 1e-9)?.k ?? n;
+  return {
+    points,
+    k80: first(0.8),
+    k90: first(0.9),
+    orders: orders.length,
+    fullGain: improvement(t0, tN)
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -2317,13 +2597,24 @@ function createView3D(container, { onPick } = {}) {
     const edgeBox = new THREE.EdgesGeometry(box);
     const lineMat = new THREE.LineBasicMaterial({ color: col.steel });
     const selLineMat = new THREE.LineBasicMaterial({ color: col.sel });
+    const white = new THREE.Color(0xffffff);
+    const catColor = {
+      A: col.sel,
+      B: col.steel.clone().lerp(white, 0.55),
+      C: col.empty,
+      moved: col.route.clone().lerp(white, 0.4)
+    };
     const shelf = [];
     const faceMarks = [];
     for (const loc of L.locations) {
       const empty = !loc.stock || loc.stock.length === 0;
       let c = empty ? col.empty : col.rack;
-      if (data.heat) c = col.heatLo.clone().lerp(col.heatHi, data.heat[loc.id] || 0);
-      const isSel = loc.id === data.selected;
+      const p = data.paint?.[loc.id];
+      if (data.paint) {
+        if (p?.t !== undefined) c = col.heatLo.clone().lerp(col.heatHi, p.t);
+        else if (p?.cat) c = catColor[p.cat] || c;
+      }
+      const isSel = loc.id === data.selected || !!data.found?.has(loc.id);
       const mesh = new THREE.Mesh(
         box,
         new THREE.MeshLambertMaterial({
@@ -2594,7 +2885,11 @@ const state = {
   visitsLayout: null,
   anim: null,
   view: '2d',
-  v3d: null
+  v3d: null,
+  color: 'none',
+  found: null,
+  plan: null,
+  planVariant: null
 };
 
 const active = () =>
@@ -3039,7 +3334,71 @@ function sampleRoute(res) {
   return { cells: routeCells(prep, r.seq), stops: r.seq.map((n) => prep.cells[n]) };
 }
 
-function renderMap3D(L, res, maxVisits) {
+const CLASS_RANK = { A: 0, B: 1, C: 2 };
+
+// Per-location colouring for the chosen "Colora per" mode, shared by the 2D and 3D views.
+// Returns { paint: {locId: {t} | {cat}}, note } or null when the mode has nothing to show.
+function paintFor(L, res) {
+  if (state.color === 'visits') {
+    if (!res) return { paint: null, note: 'Esegui la simulazione per colorare per visite.' };
+    const max = Math.max(0, ...Object.values(res.visits));
+    const paint = {};
+    for (const loc of L.locations) paint[loc.id] = { t: max ? (res.visits[loc.id] || 0) / max : 0 };
+    return { paint, note: 'Dal giallo chiaro (poche visite) al rosso (molte visite).' };
+  }
+  if (state.color === 'abc') {
+    const abc = abcClasses(state.project.demand);
+    const paint = {};
+    for (const loc of L.locations) {
+      let best = null;
+      for (const s of loc.stock || []) {
+        const c = abc[s.sku] || 'C';
+        if (!best || CLASS_RANK[c] < CLASS_RANK[best]) best = c;
+      }
+      if (best) paint[loc.id] = { cat: best };
+    }
+    return { paint, note: 'Giallo = classe A, blu = B, grigio = C (classe migliore presente).' };
+  }
+  if (state.color === 'moves') {
+    const base = baseline();
+    if (!base || base.id === L.id)
+      return { paint: null, note: 'Seleziona una variante: il confronto è con la baseline.' };
+    if (!sameFootprint(base, L))
+      return {
+        paint: null,
+        note: 'Disponibile solo per varianti con le stesse ubicazioni della baseline.'
+      };
+    const byId = new Map(base.locations.map((l) => [l.id, l]));
+    const key = (l) =>
+      (l?.stock || [])
+        .map((s) => s.sku)
+        .sort()
+        .join('|');
+    const paint = {};
+    let n = 0;
+    for (const loc of L.locations) {
+      if (key(loc) !== key(byId.get(loc.id))) {
+        paint[loc.id] = { cat: 'moved' };
+        n++;
+      }
+    }
+    return { paint, note: `${n} ubicazioni cambiano contenuto rispetto a «${base.name}».` };
+  }
+  return null;
+}
+
+function paintFill2D(p) {
+  if (!p) return '';
+  if (p.t !== undefined) return heatColor(p.t);
+  return {
+    A: 'var(--accent)',
+    B: 'color-mix(in oklab, var(--steel) 45%, white)',
+    C: 'var(--surface-2)',
+    moved: 'color-mix(in oklab, var(--route) 60%, white)'
+  }[p.cat];
+}
+
+function renderMap3D(L, res) {
   const wrap = $('#map-wrap');
   wrap.className = 'map-wrap view-3d';
   if (!window.THREE) {
@@ -3070,17 +3429,14 @@ function renderMap3D(L, res, maxVisits) {
       return;
     }
   }
-  let heat = null;
-  if (state.heat && res && maxVisits > 0) {
-    heat = {};
-    for (const loc of L.locations) heat[loc.id] = (res.visits[loc.id] || 0) / maxVisits;
-  }
+  const painted = paintFor(L, res);
   const route = sampleRoute(res);
   state.routeCells = route ? route.cells : null;
   state.v3d.update({
     layout: L,
     selected: state.selected,
-    heat,
+    found: state.found,
+    paint: painted?.paint || null,
     routeCells: route?.cells || null,
     stops: route?.stops || []
   });
@@ -3092,10 +3448,8 @@ function renderMap() {
   const H = L.depth;
   const pad = 1.4;
   const res = !state.stale ? currentResult() : null;
-  let maxVisits = 0;
-  if (state.heat && res)
-    for (const v of Object.values(res.visits)) maxVisits = Math.max(maxVisits, v);
-  if (state.view === '3d') return renderMap3D(L, res, maxVisits);
+  renderColorNote(L, res);
+  if (state.view === '3d') return renderMap3D(L, res);
   if (state.v3d) {
     state.v3d.destroy();
     state.v3d = null;
@@ -3109,18 +3463,20 @@ function renderMap() {
     grid = `<path class="gridline" d="${d}" />`;
   }
 
+  const paint = paintFor(L, res)?.paint || null;
   const locs = L.locations
     .map((loc) => {
       const f = pickFaceCell(loc);
       const empty = !loc.stock || loc.stock.length === 0;
-      let style = '';
-      if (state.heat && res && maxVisits > 0)
-        style = ` style="fill:${heatColor((res.visits[loc.id] || 0) / maxVisits)}"`;
+      const fill = paint ? paintFill2D(paint[loc.id]) : '';
+      const style = fill ? ` style="fill:${fill}"` : '';
       const fs = Math.min(0.5, (Math.max(loc.w, loc.d) / Math.max(2, loc.id.length)) * 1.1);
       return `<g class="loc" data-loc="${esc(loc.id)}">
-        <rect class="rack${loc.id === state.selected ? ' sel' : ''}${empty ? ' empty' : ''}" x="${
-        loc.x
-      }" y="${loc.y}" width="${loc.w}" height="${loc.d}"${style}><title>${esc(loc.id)}${
+        <rect class="rack${loc.id === state.selected ? ' sel' : ''}${
+        state.found?.has(loc.id) ? ' found' : ''
+      }${empty ? ' empty' : ''}" x="${loc.x}" y="${loc.y}" width="${loc.w}" height="${
+        loc.d
+      }"${style}><title>${esc(loc.id)}${
         empty ? ' (vuota)' : ': ' + esc(loc.stock.map((s) => `${s.sku} × ${s.qty}`).join(', '))
       }${res ? ` · ${res.visits[loc.id] || 0} giri` : ''}</title></rect>
         <circle class="face" cx="${f.x + 0.5}" cy="${f.y + 0.5}" r="0.13" />
@@ -3179,6 +3535,39 @@ function renderMap() {
   }</title></circle>
     ${endMark}
   </svg>`;
+}
+
+function renderColorNote(L, res) {
+  const el = $('#color-note');
+  if (!el) return;
+  const p = paintFor(L, res);
+  el.textContent = p?.note || '';
+  el.hidden = !p?.note;
+}
+
+function findSku(q) {
+  const sku = q.trim();
+  if (!sku) {
+    state.found = null;
+    renderMap();
+    return;
+  }
+  const L = active();
+  const lower = sku.toLowerCase();
+  const hits = L.locations.filter((l) =>
+    (l.stock || []).some((s) => s.sku.toLowerCase() === lower)
+  );
+  if (!hits.length) {
+    state.found = null;
+    notify(`${sku} non è collocato in «${L.name}».`, 'error');
+    renderMap();
+    return;
+  }
+  state.found = new Set(hits.map((l) => l.id));
+  state.selected = hits[0].id;
+  notify(`${sku}: ${hits.map((l) => l.id).join(', ')}.`);
+  renderMap();
+  renderInspector();
 }
 
 function svgPoint(evt) {
@@ -3588,6 +3977,9 @@ function renderDemand() {
       </tr>`;
     })
     .join('');
+  const findList = $('#sku-find-list');
+  if (findList)
+    findList.innerHTML = P.demand.map((d) => `<option value="${esc(d.sku)}"></option>`).join('');
   $('#demand').innerHTML = `
     <div class="panel-head">
       <h3>Catalogo domanda</h3>
@@ -4055,6 +4447,7 @@ function renderResults() {
       <td class="n">${fmt(r.fte, 2)}</td>
       <td class="n">${eur(r.costPerOrder, 2)}</td>
       <td class="n">${eur(r.annualCost)}</td>
+      <td class="n">${fmt(r.hotShare, 0)} %</td>
       <td class="n ${r.distanceGain > 0 ? 'pos' : r.distanceGain < 0 ? 'neg' : ''}">${
       r === base ? '–' : signed(r.distanceGain) + ' %'
     }</td>
@@ -4145,6 +4538,11 @@ function renderResults() {
       )}</span><span class="sub">${
     R.length > 1 ? `baseline ${fmt(base.fte, 2)} FTE` : `${s.dailyOrders} ordini/giorno`
   }</span></div>
+      <div class="kpi"><span class="label">Visite in zona calda</span><span class="value">${
+        R.length > 1
+          ? `${fmt(base.hotShare, 0)} → ${fmt(best.hotShare, 0)} %`
+          : `${fmt(best.hotShare, 0)} %`
+      }</span><span class="sub">20 % di ubicazioni più vicine</span></div>
       ${
         R.length > 1
           ? `<div class="kpi"><span class="label">Risparmio annuo stimato</span><span class="value ${
@@ -4159,7 +4557,7 @@ function renderResults() {
       <h3>Confronto per layout</h3>
       <p class="hint">Valori medi per ordine. Δ positivo = migliore della baseline; sotto il Δ tempo, l'intervallo ottenuto con altri seed.</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Layout</th><th class="n">Dist. m</th><th class="n">P95 m</th><th class="n">Viaggio s</th><th class="n">Prelievo s</th><th class="n">Totale s</th><th class="n">Ordini/h</th><th class="n">FTE</th><th class="n">€/ordine</th><th class="n">Costo annuo</th><th class="n">Δ dist.</th><th class="n">Δ tempo</th></tr></thead>
+        <thead><tr><th>Layout</th><th class="n">Dist. m</th><th class="n">P95 m</th><th class="n">Viaggio s</th><th class="n">Prelievo s</th><th class="n">Totale s</th><th class="n">Ordini/h</th><th class="n">FTE</th><th class="n">€/ordine</th><th class="n">Costo annuo</th><th class="n" title="Quota di visite nel 20 % di ubicazioni più vicine">Zona calda</th><th class="n">Δ dist.</th><th class="n">Δ tempo</th></tr></thead>
         <tbody>${tableRows}</tbody>
       </table></div>
     </div>
@@ -4179,11 +4577,219 @@ function renderResults() {
       <p class="hint">Il 20 % delle ubicazioni più visitate riceve il <b>${fmt(
         totalVisits ? (100 * top20) / totalVisits : 0,
         0
-      )} %</b> delle visite. Controlla che stiano vicino alla partenza: attiva la mappa di calore nel passo 1.</p>
+      )} %</b> delle visite. Controlla che stiano vicino alla partenza: nel passo 1 scegli «Colora per: visite».</p>
       ${visitChart}
     </div>
+    ${renderPlanPanel(R)}
     ${issues}
   </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Move plan                                                           */
+/* ------------------------------------------------------------------ */
+
+const layoutById = (id) => state.project.layouts.find((l) => l.id === id);
+
+// Variants that only re-slot the baseline (same locations), best first.
+function planCandidates(R) {
+  const baseL = layoutById(R[0].layoutId);
+  if (!baseL) return [];
+  return R.slice(1)
+    .filter((r) => {
+      const L = layoutById(r.layoutId);
+      return L && sameFootprint(baseL, L);
+    })
+    .sort((a, b) => b.timeGain - a.timeGain);
+}
+
+function currentPlan(R) {
+  const cands = planCandidates(R);
+  if (!cands.length) return null;
+  const vid = cands.some((c) => c.layoutId === state.planVariant)
+    ? state.planVariant
+    : cands[0].layoutId;
+  if (state.plan && state.plan.run === state.run && state.plan.variantId === vid) return state.plan;
+  const baseL = layoutById(R[0].layoutId);
+  const varL = layoutById(vid);
+  const plan = movePlan(baseL, varL, state.project.demand);
+  if (plan.error) return null;
+  const curve = plan.moves.length ? moveCurve(state.project, baseL, varL, plan) : null;
+  state.plan = { run: state.run, variantId: vid, plan, curve, cands };
+  return state.plan;
+}
+
+function curveChart(curve, total) {
+  const W = 640;
+  const H = 260;
+  const l = 48;
+  const r = 16;
+  const t = 14;
+  const b = 40;
+  const xs = (k) => l + (total ? (k / total) * (W - l - r) : 0);
+  const ys = (v) => t + (1 - Math.max(-0.2, Math.min(1.05, v))) * (H - t - b);
+  const pts = curve.points;
+  const line = pts.map((p) => `${xs(p.k).toFixed(1)},${ys(p.share).toFixed(1)}`).join(' ');
+  const area = `${xs(0)},${ys(0)} ${line} ${xs(pts[pts.length - 1].k)},${ys(0)}`;
+  let out = [0, 0.25, 0.5, 0.75, 1]
+    .map(
+      (v) =>
+        `<line class="axis" x1="${l}" x2="${W - r}" y1="${ys(v)}" y2="${ys(
+          v
+        )}" /><text class="v m" x="${l - 8}" y="${ys(v) + 4}" text-anchor="end">${Math.round(
+          v * 100
+        )} %</text>`
+    )
+    .join('');
+  out += `<line class="ref" x1="${l}" x2="${W - r}" y1="${ys(0.8)}" y2="${ys(0.8)}" />`;
+  out += `<polygon class="curve-area" points="${area}" /><polyline class="curve" points="${line}" />`;
+  out += pts
+    .map(
+      (p) =>
+        `<circle class="dot${p.k === curve.k80 ? ' hit' : ''}" cx="${xs(p.k)}" cy="${ys(
+          p.share
+        )}" r="${p.k === curve.k80 ? 6 : 3.5}"><title>${p.k} mosse: ${fmt(
+          p.share * 100,
+          0
+        )} % del guadagno</title></circle>`
+    )
+    .join('');
+  const ticks = pts.filter(
+    (p, i) => i === 0 || i === pts.length - 1 || p.k === curve.k80 || i % 2 === 0
+  );
+  out += ticks
+    .map(
+      (p) => `<text class="v m" x="${xs(p.k)}" y="${H - b + 18}" text-anchor="middle">${p.k}</text>`
+    )
+    .join('');
+  out += `<text class="m" x="${(l + W - r) / 2}" y="${
+    H - 4
+  }" text-anchor="middle">Mosse applicate, in ordine di priorità</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Quota del guadagno per numero di mosse">${out}</svg>`;
+}
+
+function renderPlanPanel(R) {
+  if (R.length < 2) return '';
+  const P = currentPlan(R);
+  if (!P) {
+    return `<div class="panel"><h3>Piano di spostamenti</h3><p class="hint">Disponibile quando confronti la baseline con una variante che ha le stesse ubicazioni (per esempio «Variante slotting ABC»): così si vede quali spostamenti producono il guadagno.</p></div>`;
+  }
+  const { plan, curve, variantId, cands } = P;
+  const varName = layoutById(variantId)?.name || '';
+  if (!plan.moves.length) {
+    return `<div class="panel"><h3>Piano di spostamenti</h3><p class="hint">«${esc(
+      varName
+    )}» ha lo stesso contenuto della baseline: nessuno spostamento.</p></div>`;
+  }
+  const total = plan.moves.length;
+  const n = Math.min(total, Math.max(1, state.planN || curve.k80));
+  const pct = (100 * curve.k80) / total;
+  const rows = plan.moves
+    .slice(0, 15)
+    .map(
+      (m, i) => `<tr>
+        <td class="n">${i + 1}</td>
+        <td class="mono">${esc(m.sku)}</td>
+        <td><span class="abc abc-${m.cls}">${m.cls}</span></td>
+        <td class="mono">${esc(m.from)} → <b>${esc(m.to)}</b></td>
+        <td class="mono">${m.displaced ? `${esc(m.displaced)} → ${esc(m.from)}` : '–'}</td>
+        <td class="n ${m.saving > 0 ? 'pos' : m.saving < 0 ? 'neg' : ''}">${fmt(m.saving, 0)}</td>
+        <td class="n">${fmt(m.cumShare * 100, 0)} %</td>
+      </tr>`
+    )
+    .join('');
+  return `<div class="panel">
+    <div class="panel-head"><h3>Piano di spostamenti</h3>
+      ${
+        cands.length > 1
+          ? `<select id="plan-variant" style="width:auto;max-width:100%" aria-label="Variante da realizzare">${cands
+              .map(
+                (c) =>
+                  `<option value="${esc(c.layoutId)}" ${
+                    c.layoutId === variantId ? 'selected' : ''
+                  }>${esc(c.name)}</option>`
+              )
+              .join('')}</select>`
+          : ''
+      }
+    </div>
+    <p class="hint">Non serve spostare tutto. Per passare da «${esc(R[0].name)}» a «${esc(
+    varName
+  )}» servono <b>${total}</b> scambi (${
+    plan.changedLocations
+  } ubicazioni cambiano contenuto). Le prime <b>${curve.k80}</b> (${fmt(
+    pct,
+    0
+  )} %) danno già l'<b>80 %</b> del guadagno di tempo; le prime ${curve.k90} il 90 %.</p>
+    <div class="plan-grid">
+      <div class="chart">
+        ${curveChart(curve, total)}
+        <p class="hint">Curva misurata simulando ${curve.orders.toLocaleString(
+          'it-IT'
+        )} ordini dopo ogni gruppo di mosse, non stimata: chi viene spostato via finisce più lontano e anche questo entra nel conto. Guadagno completo: ${fmt(
+    curve.fullGain,
+    1
+  )} %.</p>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th class="n">#</th><th>SKU</th><th>ABC</th><th>Da → A</th><th>Sposta via</th><th class="n" title="Metri di andata e ritorno risparmiati ogni 1.000 righe d'ordine (indice di priorità)">m / 1.000 righe</th><th class="n" title="Stima: la curva a sinistra è il valore simulato">Cumulato (stima)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${
+        total > 15 ? `<p class="hint">Prime 15 di ${total}. L'elenco completo è nel CSV.</p>` : ''
+      }</div>
+    </div>
+    <div class="run-row">
+      <label class="inline-field" for="plan-n"><span>Prime</span><input type="number" id="plan-n" min="1" max="${total}" step="1" value="${n}" style="width:80px" /><span>mosse</span></label>
+      <button type="button" class="btn dark" data-res-act="apply-plan">Crea layout con queste mosse e simula</button>
+      <button type="button" class="btn" data-res-act="plan-csv">Esporta piano CSV</button>
+    </div>
+  </div>`;
+}
+
+function applyPlan() {
+  const P = state.plan;
+  if (!P) return;
+  const total = P.plan.moves.length;
+  const n = Math.min(total, Math.max(1, Math.round(toNum($('#plan-n')?.value, P.curve.k80))));
+  const baseL = layoutById(state.run.results[0].layoutId);
+  const varL = layoutById(P.variantId);
+  const L = applyMoves(baseL, P.plan.moves.slice(0, n), `${baseL.name} · prime ${n} mosse`);
+  L.include = true;
+  const P2 = state.project.layouts;
+  P2.splice(P2.indexOf(varL), 0, L);
+  state.planN = n;
+  notify(`Creato «${L.name}». Simulazione in corso sugli stessi ordini.`);
+  save();
+  renderAll();
+  runSimulation();
+}
+
+function planCsv() {
+  const P = state.plan;
+  const head = [
+    'Ordine',
+    'SKU',
+    'Classe',
+    'Da',
+    'A',
+    'SpostatoVia',
+    'Indice_m_per_1000_righe',
+    'CumulatoStimato_pct'
+  ];
+  const rows = P.plan.moves.map((m, i) =>
+    [
+      i + 1,
+      m.sku,
+      m.cls,
+      m.from,
+      m.to,
+      m.displaced || '',
+      m.saving.toFixed(1).replace('.', ','),
+      (m.cumShare * 100).toFixed(1).replace('.', ',')
+    ].join(';')
+  );
+  return [head.join(';'), ...rows].join('\n');
 }
 
 function resultsCsv() {
@@ -4203,6 +4809,7 @@ function resultsCsv() {
     'CostoAnnuo',
     'DeltaDistanza_pct',
     'DeltaTempo_pct',
+    'ZonaCalda_pct',
     'RigheNonEvase'
   ];
   const rows = R.map((r) =>
@@ -4221,6 +4828,7 @@ function resultsCsv() {
       r.annualCost,
       r.distanceGain,
       r.timeGain,
+      r.hotShare,
       r.shortLines
     ]
       .map((v) =>
@@ -4398,6 +5006,7 @@ function wire() {
     if (card && card.dataset.layout !== state.activeId) {
       state.activeId = card.dataset.layout;
       state.selected = null;
+      state.found = null;
       stopAnim();
       renderAll();
     }
@@ -4435,12 +5044,15 @@ function wire() {
     const b = e.target.closest('[data-preset]');
     if (b && state.v3d) state.v3d.preset(b.dataset.preset);
   });
-  $('#chk-heat').addEventListener('change', (e) => {
-    state.heat = e.target.checked;
-    if (state.heat && (!state.run || state.stale))
-      notify("La mappa di calore usa l'ultima simulazione: eseguila per vedere i colori.");
+  $('#color-mode').addEventListener('change', (e) => {
+    state.color = e.target.value;
     renderMap();
   });
+  $('#find-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    findSku($('#find-sku').value);
+  });
+
   $('#chk-labels').addEventListener('change', (e) => {
     state.labels = e.target.checked;
     renderMap();
@@ -4514,6 +5126,14 @@ function wire() {
     if (!b) return;
     const act = b.dataset.resAct;
     if (act === 'run') runSimulation();
+    else if (act === 'apply-plan') applyPlan();
+    else if (act === 'plan-csv')
+      showExport(
+        'Piano di spostamenti',
+        planCsv(),
+        'pick-path-lab-piano-spostamenti.csv',
+        'text/csv'
+      );
     else if (act === 'csv')
       showExport('Risultati CSV', resultsCsv(), 'pick-path-lab-risultati.csv', 'text/csv');
     else if (act === 'json')
@@ -4525,6 +5145,16 @@ function wire() {
       );
   });
   $('#results').addEventListener('change', (e) => {
+    if (e.target.id === 'plan-variant') {
+      state.planVariant = e.target.value;
+      state.planN = null;
+      renderResults();
+      return;
+    }
+    if (e.target.id === 'plan-n') {
+      state.planN = Math.round(toNum(e.target.value, 1));
+      return;
+    }
     if (e.target.id === 'visits-layout') {
       state.visitsLayout = e.target.value;
       renderResults();

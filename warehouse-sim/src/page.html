@@ -66,8 +66,27 @@
               zoom · clic su uno scaffale per selezionarlo</span
             >
           </div>
-          <label class="check"><input type="checkbox" id="chk-heat" /> Mappa di calore</label>
+          <label class="inline-field" for="color-mode"
+            ><span>Colora per</span>
+            <select id="color-mode">
+              <option value="none">Nessuno</option>
+              <option value="visits">Visite (mappa di calore)</option>
+              <option value="abc">Classe ABC</option>
+              <option value="moves">Spostamenti vs baseline</option>
+            </select></label
+          >
+          <form class="find" id="find-form" role="search">
+            <input
+              type="search"
+              id="find-sku"
+              list="sku-find-list"
+              placeholder="Trova SKU"
+              aria-label="Trova SKU" />
+            <datalist id="sku-find-list"></datalist>
+            <button type="submit" class="btn small">Trova</button>
+          </form>
         </div>
+        <p class="hint color-note" id="color-note" hidden></p>
         <div class="map-wrap" id="map-wrap"></div>
         <div class="legend">
           <span><i class="sw sw-rack"></i>Ubicazione</span>
@@ -75,7 +94,7 @@
           <span><i class="sw sw-start"></i>Partenza</span>
           <span><i class="sw sw-end"></i>Arrivo</span>
           <span><i class="sw sw-route"></i>Percorso</span>
-          <span><i class="sw sw-heat"></i>Calore: visite per giro</span>
+          <span><i class="sw sw-found"></i>SKU trovato</span>
         </div>
         <div class="route-bar" id="route-bar"></div>
         <ul class="issues" id="layout-issues"></ul>

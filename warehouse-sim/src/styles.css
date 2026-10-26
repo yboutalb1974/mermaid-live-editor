@@ -943,3 +943,63 @@ pre.code {
   text-align: center;
   color: var(--muted);
 }
+
+/* Colour modes and SKU search */
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+.inline-field span {
+  color: var(--muted);
+  font-weight: 600;
+}
+.inline-field select {
+  width: auto;
+}
+.find {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.find input {
+  width: 150px;
+}
+.color-note {
+  margin-top: -4px;
+}
+svg .rack.found {
+  stroke: var(--route);
+  stroke-width: 0.3;
+}
+.sw-found {
+  border: 2px solid var(--route);
+  background: transparent;
+}
+.plan-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+}
+.chart .curve {
+  fill: none;
+  stroke: var(--steel);
+  stroke-width: 2.5;
+}
+.chart .curve-area {
+  fill: var(--steel-soft);
+  opacity: 0.6;
+}
+.chart .dot {
+  fill: var(--steel);
+}
+.chart .dot.hit {
+  fill: var(--accent);
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+.chart .ref {
+  stroke: var(--muted);
+  stroke-dasharray: 4 4;
+}

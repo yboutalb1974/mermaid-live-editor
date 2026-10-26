@@ -2,7 +2,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  applyMoves,
   autoSlot,
+  moveCurve,
+  movePlan,
   generateOrders,
   generateRacks,
   parseDemandCsv,
@@ -123,4 +126,46 @@ test('history mode uses the imported orders', () => {
   const run = simulate(p);
   assert.equal(run.ordersCount, 1);
   assert.equal(run.results[0].orders, 1);
+});
+
+test('move plan replays exactly into the proposed slotting and its curve rises', () => {
+  const p = sampleProject();
+  const [base, , slotted] = p.layouts;
+  const plan = movePlan(base, slotted, p.demand);
+  assert.equal(plan.error, undefined);
+  assert.ok(plan.moves.length > 0);
+  const key = (L) =>
+    L.locations
+      .map(
+        (l) =>
+          l.id +
+          ':' +
+          l.stock
+            .map((s) => s.sku)
+            .sort()
+            .join(',')
+      )
+      .sort()
+      .join(';');
+  assert.equal(key(applyMoves(base, plan.moves, 'full')), key(slotted));
+  const curve = moveCurve(
+    { ...p, settings: { ...p.settings, orders: 800 } },
+    base,
+    slotted,
+    plan,
+    800
+  );
+  assert.ok(curve.k80 < plan.moves.length, 'a part of the moves should give 80 % of the gain');
+  assert.ok(curve.points[1].share > 0, 'the first move should help');
+});
+
+test('move plan refuses layouts with different geometry', () => {
+  const p = sampleProject();
+  assert.ok(movePlan(p.layouts[0], p.layouts[1], p.demand).error);
+});
+
+test('hot zone share rises with ABC slotting', () => {
+  const p = sampleProject();
+  const run = simulate({ ...p, settings: { ...p.settings, robustness: false } });
+  assert.ok(run.results[2].hotShare > run.results[0].hotShare);
 });

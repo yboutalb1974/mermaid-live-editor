@@ -192,13 +192,24 @@ export function createView3D(container, { onPick } = {}) {
     const edgeBox = new THREE.EdgesGeometry(box);
     const lineMat = new THREE.LineBasicMaterial({ color: col.steel });
     const selLineMat = new THREE.LineBasicMaterial({ color: col.sel });
+    const white = new THREE.Color(0xffffff);
+    const catColor = {
+      A: col.sel,
+      B: col.steel.clone().lerp(white, 0.55),
+      C: col.empty,
+      moved: col.route.clone().lerp(white, 0.4)
+    };
     const shelf = [];
     const faceMarks = [];
     for (const loc of L.locations) {
       const empty = !loc.stock || loc.stock.length === 0;
       let c = empty ? col.empty : col.rack;
-      if (data.heat) c = col.heatLo.clone().lerp(col.heatHi, data.heat[loc.id] || 0);
-      const isSel = loc.id === data.selected;
+      const p = data.paint?.[loc.id];
+      if (data.paint) {
+        if (p?.t !== undefined) c = col.heatLo.clone().lerp(col.heatHi, p.t);
+        else if (p?.cat) c = catColor[p.cat] || c;
+      }
+      const isSel = loc.id === data.selected || !!data.found?.has(loc.id);
       const mesh = new THREE.Mesh(
         box,
         new THREE.MeshLambertMaterial({

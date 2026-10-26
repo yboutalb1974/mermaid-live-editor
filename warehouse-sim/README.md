@@ -15,6 +15,8 @@ la simulazione viene eseguita subito.
    campione e mappa di calore; si ruota trascinando e si seleziona uno scaffale con un clic. È solo una vista:
    i calcoli restano a terra. Il motore 3D (three.js) si scarica da cdnjs alla prima apertura, quindi serve
    internet; il resto funziona offline.
+   "Colora per" mostra visite, classe ABC o ubicazioni cambiate rispetto alla baseline (in 2D e in 3D);
+   "Trova SKU" evidenzia dove si trova un articolo.
 2. **Domanda e ordini**: catalogo SKU con pesi di frequenza (classi ABC calcolate) e import CSV; import di
    ordini storici (`OrderID;SKU;Qty`) per simulare con le combinazioni reali di SKU.
 3. **Parametri**: numero ordini, righe per ordine, velocità, tempi per riga e per pezzo, batch (più ordini per
@@ -22,7 +24,10 @@ la simulazione viene eseguita subito.
    turni, giorni, utilizzo).
 4. **Risultati**: distanza e tempo per ordine, P95, ordini/ora, FTE, costo per ordine e annuo, risparmio rispetto
    alla baseline, intervallo di robustezza su altri seed, ubicazioni più visitate, percorsi campione animati sulla
-   pianta e mappa di calore.
+   pianta e mappa di calore, quota di visite nella "zona calda" (20 % di ubicazioni più vicine).
+   **Piano di spostamenti**: per una variante con le stesse ubicazioni della baseline (per esempio lo slotting
+   ABC) elenca gli scambi in ordine di priorità e mostra, simulando, quante mosse servono per l'80 % del
+   guadagno. "Crea layout con queste mosse" genera il layout parziale e lo simula sugli stessi ordini.
 
 Il progetto si salva automaticamente nel browser; "Esporta progetto" produce un JSON da conservare o condividere.
 
