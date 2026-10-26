@@ -1,0 +1,195 @@
+<title>Pick Path Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" />
+<style>
+  /*__STYLES__*/
+</style>
+
+<div class="app">
+  <header class="masthead">
+    <div class="brand">
+      <h1>Pick Path Lab</h1>
+      <p>
+        Confronta layout e slotting del magazzino sugli stessi ordini, prima di spostare uno
+        scaffale.
+      </p>
+    </div>
+    <div class="project-actions">
+      <button type="button" id="btn-sample" class="btn">Carica esempio</button>
+      <button type="button" id="btn-export" class="btn">Esporta progetto</button>
+      <label class="btn file-btn" for="file-project">Importa progetto</label>
+      <input type="file" id="file-project" accept=".json,application/json" hidden />
+    </div>
+    <div class="hazard" aria-hidden="true"></div>
+  </header>
+
+  <nav class="steps" id="steps" aria-label="Passi">
+    <button type="button" data-tab="layout" class="step active"><b>1</b> Layout</button>
+    <button type="button" data-tab="demand" class="step"><b>2</b> Domanda e ordini</button>
+    <button type="button" data-tab="sim" class="step"><b>3</b> Parametri</button>
+    <button type="button" data-tab="results" class="step"><b>4</b> Risultati</button>
+  </nav>
+
+  <p class="notice" id="notice" role="status" hidden></p>
+
+  <!-- 1. LAYOUT -->
+  <section class="tab" id="tab-layout">
+    <div class="layout-bar" id="layout-list"></div>
+
+    <div class="workbench">
+      <div class="canvas-col">
+        <div class="toolbar">
+          <div class="seg view-seg" id="view-toggle" role="group" aria-label="Vista">
+            <button type="button" data-view="2d" class="active">2D</button>
+            <button type="button" data-view="3d">3D</button>
+          </div>
+          <div class="tool-group" id="tools-2d">
+            <div class="seg" id="tool-seg" role="group" aria-label="Strumento">
+              <button type="button" data-tool="select" class="active">Seleziona / sposta</button>
+              <button type="button" data-tool="add">Aggiungi scaffale</button>
+              <button type="button" data-tool="start">Posa partenza</button>
+              <button type="button" data-tool="end">Posa arrivo</button>
+            </div>
+            <label class="check"><input type="checkbox" id="chk-labels" checked /> Codici</label>
+          </div>
+          <div class="tool-group" id="tools-3d" hidden>
+            <div class="seg" role="group" aria-label="Inquadratura">
+              <button type="button" data-preset="iso">Prospettiva</button>
+              <button type="button" data-preset="top">Dall'alto</button>
+              <button type="button" data-preset="front">Frontale</button>
+            </div>
+            <span class="hint"
+              >Trascina per ruotare · Shift o tasto destro per spostare · rotella o due dita per lo
+              zoom · clic su uno scaffale per selezionarlo</span
+            >
+          </div>
+          <label class="inline-field" for="color-mode"
+            ><span>Colora per</span>
+            <select id="color-mode">
+              <option value="none">Nessuno</option>
+              <option value="visits">Visite (mappa di calore)</option>
+              <option value="abc">Classe ABC</option>
+              <option value="moves">Spostamenti vs baseline</option>
+            </select></label
+          >
+          <form class="find" id="find-form" role="search">
+            <input
+              type="search"
+              id="find-sku"
+              list="sku-find-list"
+              placeholder="Trova SKU"
+              aria-label="Trova SKU" />
+            <datalist id="sku-find-list"></datalist>
+            <button type="submit" class="btn small">Trova</button>
+          </form>
+        </div>
+        <p class="hint color-note" id="color-note" hidden></p>
+        <div class="map-wrap" id="map-wrap"></div>
+        <div class="legend">
+          <span><i class="sw sw-rack"></i>Ubicazione</span>
+          <span><i class="sw sw-face"></i>Lato di prelievo</span>
+          <span><i class="sw sw-start"></i>Partenza</span>
+          <span><i class="sw sw-end"></i>Arrivo</span>
+          <span><i class="sw sw-route"></i>Percorso</span>
+          <span><i class="sw sw-found"></i>SKU trovato</span>
+        </div>
+        <div class="route-bar" id="route-bar"></div>
+        <ul class="issues" id="layout-issues"></ul>
+      </div>
+
+      <aside class="inspector" id="inspector"></aside>
+    </div>
+
+    <div class="panels">
+      <div class="panel" id="geometry"></div>
+      <details class="panel" id="generator-panel">
+        <summary>Generatore di scaffalature</summary>
+        <div id="generator"></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- 2. DEMAND -->
+  <section class="tab" id="tab-demand" hidden>
+    <div class="panels">
+      <div class="panel wide" id="demand"></div>
+      <div class="panel" id="history"></div>
+    </div>
+  </section>
+
+  <!-- 3. SETTINGS -->
+  <section class="tab" id="tab-sim" hidden>
+    <div class="panel" id="settings"></div>
+  </section>
+
+  <!-- 4. RESULTS -->
+  <section class="tab" id="tab-results" hidden>
+    <div id="results"></div>
+    <details class="panel method">
+      <summary>Metodo e limiti del modello</summary>
+      <div class="method-grid">
+        <div>
+          <h4>Percorsi</h4>
+          <p>
+            Il pavimento è una griglia da 1 m. Le celle occupate dagli scaffali sono bloccate; il
+            resto è percorribile in entrambi i sensi. Le distanze sono cammini minimi ortogonali
+            calcolati con ricerca in ampiezza tra partenza, arrivo e la cella davanti al lato di
+            prelievo di ogni ubicazione.
+          </p>
+        </div>
+        <div>
+          <h4>Ordini</h4>
+          <p>
+            In modalità casuale ogni ordine estrae righe di SKU diversi con probabilità
+            proporzionale al peso; quantità uniforme tra 1 e il massimo impostato. In modalità
+            storica si usano gli ordini reali così come sono, mantenendo gli SKU che vengono
+            ordinati insieme. Tutti i layout ricevono esattamente gli stessi ordini.
+          </p>
+        </div>
+        <div>
+          <h4>Allocazione e sequenza</h4>
+          <p>
+            Ogni riga viene presa da un'ubicazione già nel giro, altrimenti dalla più vicina alla
+            partenza con stock sufficiente. Lo stock si ripristina a ogni giro (rifornimento
+            continuo). La sequenza è alfabetica, vicino più prossimo o vicino più prossimo
+            migliorato con 2-opt; nessuna garantisce il giro minimo assoluto.
+          </p>
+        </div>
+        <div>
+          <h4>Tempi e costi</h4>
+          <p>
+            Tempo per ordine = (distanza ÷ velocità + preparazione giro) ÷ ordini nel giro + righe ×
+            tempo riga + unità × tempo unità (+ smistamento se in batch). Costo = tempo ÷ utilizzo ×
+            costo orario. Il guadagno è (baseline − alternativa) ÷ baseline.
+          </p>
+        </div>
+      </div>
+      <p class="limits">
+        Non modellato: più operatori e congestione nei corridoi, sensi unici, altezza dei livelli e
+        prelievo in quota, ergonomia, rifornimenti e vincoli di sicurezza. Le larghezze dei corridoi
+        sono geometriche, non una verifica normativa. Valida con tempi misurati sul campo prima di
+        investire.
+      </p>
+    </details>
+  </section>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 id="modal-title"></h3>
+      <p id="modal-text"></p>
+      <textarea id="modal-area" readonly spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn primary" id="modal-copy">Copia</button>
+        <button type="button" class="btn" id="modal-download">Scarica file</button>
+        <button type="button" class="btn ghost" id="modal-close">Chiudi</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  /*__SCRIPT__*/
+</script>
