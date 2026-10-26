@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   applyMoves,
+  applyStock,
+  layoutFromWms,
+  parseLocationSheet,
+  parseStockSheet,
   autoSlot,
   moveCurve,
   movePlan,
@@ -168,4 +172,58 @@ test('hot zone share rises with ABC slotting', () => {
   const p = sampleProject();
   const run = simulate({ ...p, settings: { ...p.settings, robustness: false } });
   assert.ok(run.results[2].hotShare > run.results[0].hotShare);
+});
+
+test('WMS location master: side-by-side header blocks become a reachable floor plan', () => {
+  // Two blocks like the WMS export: right side (odd bins) and left side (even bins).
+  const rows = [
+    ["Total Bay's", '', 2],
+    [
+      'Aisle Name',
+      'Bay Number',
+      'Level',
+      'Bin Number',
+      'Location',
+      '',
+      'Aisle Name',
+      'Bay Number',
+      'Level',
+      'Bin Number'
+    ],
+    ['AR', '01', 'A', 1, 'AR01A1', '', 'AR', '01', 'A', 2],
+    ['AR', '01', 'B', 1, 'AR01B1', '', 'AR', '01', 'B', 2],
+    ['AR', '02', 'A', 1, 'AR02A1', '', 'AR', '02', 'A', 2],
+    ['AQ', '01', 'A', 1, 'AQ01A1', '', '', '', '', ''],
+    ['AQ', 1, 'B', 1, 'AQ01B1', '', '', '', '', '']
+  ];
+  const { locations, headerGroups } = parseLocationSheet(rows);
+  assert.equal(headerGroups, 2);
+  assert.equal(locations.length, 8);
+  const g = layoutFromWms(locations);
+  assert.deepEqual(g.aisles, ['AR', 'AQ']);
+  assert.equal(g.levels, 2);
+  assert.equal(g.locations.length, 5); // AR01-1, AR01-2, AR02-1, AR02-2, AQ01-1
+  const ar011 = g.locations.find((l) => l.id === 'AR01-1');
+  assert.deepEqual(ar011.wms, ['AR01A1', 'AR01B1']);
+  assert.equal(ar011.face, 'E');
+  assert.equal(g.locations.find((l) => l.id === 'AR01-2').face, 'W');
+  const prep = prepareLayout({ id: 'w', name: 'w', sameEnd: true, end: g.start, ...g });
+  assert.deepEqual(prep.errors, []);
+
+  const stock = parseStockSheet([
+    ['Ubicazione', 'SKU', 'Qta'],
+    ['ar01b1', 'X', '3'],
+    ['AR01A1', 'X', 2],
+    ['ZZ01A1', 'Y', 1]
+  ]);
+  const L = { locations: g.locations };
+  const res = applyStock(L, stock);
+  assert.equal(res.placed, 2);
+  assert.deepEqual(res.unknown, ['ZZ01A1']);
+  assert.deepEqual(ar011.stock, [{ sku: 'X', qty: 5 }]);
+});
+
+test('WMS import also reads bare location codes', () => {
+  const { locations } = parseLocationSheet([['Codice'], ['AR01A1'], ['AR01B3'], ['xx']]);
+  assert.equal(locations.length, 2);
 });

@@ -20,6 +20,12 @@
     <div class="project-actions">
       <button type="button" id="btn-sample" class="btn">Carica esempio</button>
       <button type="button" id="btn-export" class="btn">Esporta progetto</button>
+      <label class="btn dark file-btn" for="file-wms">Importa ubicazioni (Excel/CSV)</label>
+      <input
+        type="file"
+        id="file-wms"
+        accept=".xlsx,.xls,.csv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+        hidden />
       <label class="btn file-btn" for="file-project">Importa progetto</label>
       <input type="file" id="file-project" accept=".json,application/json" hidden />
     </div>
@@ -104,6 +110,10 @@
     </div>
 
     <div class="panels">
+      <details class="panel wide" id="wms-panel">
+        <summary>Importa ubicazioni dal WMS (Excel o CSV)</summary>
+        <div id="wms-import"></div>
+      </details>
       <div class="panel" id="geometry"></div>
       <details class="panel" id="generator-panel">
         <summary>Generatore di scaffalature</summary>

@@ -1107,6 +1107,222 @@ export function demandFromHistory(history) {
 }
 
 /* ------------------------------------------------------------------ */
+/* WMS location master import                                          */
+/* ------------------------------------------------------------------ */
+
+const norm = (v) =>
+  String(v ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[^a-z0-9]/g, '');
+const AISLE_KEYS = new Set([
+  'aislename',
+  'aisle',
+  'corsia',
+  'corridoio',
+  'nomecorsia',
+  'gang',
+  'allee'
+]);
+const BAY_KEYS = new Set(['baynumber', 'bay', 'campata', 'modulo', 'colonna', 'baynr']);
+const LEVEL_KEYS = new Set(['level', 'livello', 'piano', 'lvl', 'niveau']);
+const BIN_KEYS = new Set(['binnumber', 'bin', 'posto', 'posizione', 'cella', 'slot', 'binnr']);
+const CODE_RE = /^([A-Z]{1,3})(\d{1,3})([A-Z])(\d{1,2})$/;
+
+const padBay = (b) => {
+  const s = String(b ?? '').trim();
+  return /^\d+$/.test(s) ? s.padStart(2, '0') : s;
+};
+
+// Reads WMS locations (aisle, bay, level, bin) from a sheet given as an array of rows.
+// Finds every header group "Aisle | Bay | Level | Bin" anywhere in the sheet (side-by-side
+// blocks are fine) and reads the rows below it. Falls back to cells that look like codes
+// such as AR01C3 (aisle AR, bay 01, level C, bin 3).
+export function parseLocationSheet(rows) {
+  const found = new Map();
+  const add = (aisle, bay, level, bin) => {
+    const a = String(aisle ?? '')
+      .trim()
+      .toUpperCase();
+    const b = padBay(bay);
+    const l = String(level ?? '')
+      .trim()
+      .toUpperCase();
+    const n = String(bin ?? '').trim();
+    if (!a || !b || !l || !n || !/^\d+$/.test(n)) return;
+    const code = `${a}${b}${l}${n}`;
+    if (!found.has(code)) found.set(code, { aisle: a, bay: b, level: l, bin: Number(n), code });
+  };
+  let headers = 0;
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r] || [];
+    for (let c = 0; c + 3 < row.length; c++) {
+      if (!AISLE_KEYS.has(norm(row[c]))) continue;
+      if (
+        !BAY_KEYS.has(norm(row[c + 1])) ||
+        !LEVEL_KEYS.has(norm(row[c + 2])) ||
+        !BIN_KEYS.has(norm(row[c + 3]))
+      )
+        continue;
+      headers++;
+      for (let k = r + 1; k < rows.length; k++) {
+        const x = rows[k] || [];
+        if (x[c] === undefined || x[c] === null || String(x[c]).trim() === '') continue;
+        if (AISLE_KEYS.has(norm(x[c]))) break;
+        add(x[c], x[c + 1], x[c + 2], x[c + 3]);
+      }
+    }
+  }
+  if (found.size === 0) {
+    for (const row of rows) {
+      for (const v of row || []) {
+        const m = CODE_RE.exec(
+          String(v ?? '')
+            .trim()
+            .toUpperCase()
+        );
+        if (m) add(m[1], m[2], m[3], m[4]);
+      }
+    }
+  }
+  return { locations: [...found.values()], headerGroups: headers };
+}
+
+export const DEFAULT_WMS_IMPORT = {
+  binWidth: 1, // m along the aisle per bin position
+  rackDepth: 1, // m
+  walkway: 3, // m between the two sides of an aisle
+  frontAisle: 4, // m at the entrance end (bay 01)
+  backAisle: 2, // m at the far end
+  margin: 1, // m between the outer racks and the walls
+  reverseAisles: false, // place the aisles in the opposite order
+  oddSide: 'right' // odd bins on the right side when walking in from the entrance
+};
+
+// Builds a 2D layout from WMS locations. Each aisle is a walkway with racks on both sides;
+// consecutive aisles stand back to back. Bay 01 is at the entrance (top of the plan) and
+// each bay holds its bin positions in order along the aisle. Every floor position stacks
+// all its levels: one simulated location per aisle/bay/bin, carrying the WMS codes.
+export function layoutFromWms(list, opts = {}) {
+  const p = { ...DEFAULT_WMS_IMPORT, ...opts };
+  const aisles = [...new Set(list.map((l) => l.aisle))];
+  if (!p.reverseAisles) aisles.sort((a, b) => naturalCompare(b, a));
+  else aisles.sort(naturalCompare);
+  const levels = [...new Set(list.map((l) => l.level))].sort(naturalCompare);
+
+  // Floor positions per aisle and side.
+  const pos = new Map();
+  for (const l of list) {
+    const odd = l.bin % 2 === 1;
+    const side =
+      (odd ? p.oddSide : p.oddSide === 'right' ? 'left' : 'right') === 'right' ? 'R' : 'L';
+    const key = `${l.aisle}|${side}|${l.bay}|${l.bin}`;
+    if (!pos.has(key)) pos.set(key, { aisle: l.aisle, side, bay: l.bay, bin: l.bin, codes: [] });
+    pos.get(key).codes.push(l.code);
+  }
+  // Bin order inside a bay, per aisle and side (e.g. 1,3,5 or 2,4,6).
+  const binsOf = new Map();
+  for (const v of pos.values()) {
+    const k = `${v.aisle}|${v.side}`;
+    if (!binsOf.has(k)) binsOf.set(k, new Set());
+    binsOf.get(k).add(v.bin);
+  }
+  const binsPerBay = Math.max(1, ...[...binsOf.values()].map((s) => s.size));
+  const bayLen = binsPerBay * p.binWidth;
+  const bays = [...new Set(list.map((l) => l.bay))].sort(naturalCompare);
+  const bayIndex = new Map(bays.map((b, i) => [b, i]));
+
+  // Facing down the aisle from the entrance, the right-hand side is towards smaller x.
+  const aisleW = 2 * p.rackDepth + p.walkway;
+  const width = 2 * p.margin + aisles.length * aisleW;
+  const depth = p.frontAisle + bays.length * bayLen + p.backAisle;
+  const locations = [];
+  aisles.forEach((a, i) => {
+    const x0 = p.margin + i * aisleW;
+    for (const side of ['R', 'L']) {
+      const order = [...(binsOf.get(`${a}|${side}`) || [])].sort((x, y) => x - y);
+      for (const v of pos.values()) {
+        if (v.aisle !== a || v.side !== side) continue;
+        const k = order.indexOf(v.bin);
+        locations.push({
+          id: `${a}${v.bay}-${v.bin}`,
+          x: side === 'R' ? x0 : x0 + p.rackDepth + p.walkway,
+          y: p.frontAisle + bayIndex.get(v.bay) * bayLen + k * p.binWidth,
+          w: p.rackDepth,
+          d: p.binWidth,
+          face: side === 'R' ? 'E' : 'W',
+          stock: [],
+          wms: v.codes.sort(naturalCompare)
+        });
+      }
+    }
+  });
+  locations.sort((a, b) => naturalCompare(a.id, b.id));
+  return {
+    width,
+    depth,
+    levels: levels.length,
+    levelNames: levels,
+    aisles,
+    locations,
+    start: { x: Math.floor(width / 2), y: 1 }
+  };
+}
+
+// Stock by WMS code or floor id: Location/Ubicazione, SKU, Qty.
+export function parseStockSheet(rows) {
+  let h = -1;
+  let ci = {};
+  for (let r = 0; r < Math.min(rows.length, 50) && h < 0; r++) {
+    const keys = (rows[r] || []).map(norm);
+    const find = (set) => keys.findIndex((k) => set.includes(k));
+    const loc = find(['location', 'ubicazione', 'locazione', 'bin', 'binlocation', 'posizione']);
+    const sku = find(['sku', 'articolo', 'item', 'codicearticolo', 'material', 'materiale']);
+    if (loc >= 0 && sku >= 0) {
+      h = r;
+      ci = { loc, sku, qty: find(['qty', 'qta', 'quantita', 'quantity', 'giacenza', 'stock']) };
+    }
+  }
+  if (h < 0) return [];
+  const out = [];
+  for (const row of rows.slice(h + 1)) {
+    const loc = String(row?.[ci.loc] ?? '')
+      .trim()
+      .toUpperCase();
+    const sku = String(row?.[ci.sku] ?? '').trim();
+    if (!loc || !sku) continue;
+    const q = ci.qty >= 0 ? Number(String(row[ci.qty]).replace(',', '.')) : 1;
+    out.push({ loc, sku, qty: Number.isFinite(q) && q > 0 ? q : 1 });
+  }
+  return out;
+}
+
+// Puts stock rows on the layout's floor positions (matched by WMS code or by floor id).
+// Replaces all existing stock. Returns counts and the codes that matched nothing.
+export function applyStock(layout, rows) {
+  const byCode = new Map();
+  for (const l of layout.locations) {
+    byCode.set(l.id.toUpperCase(), l);
+    for (const c of l.wms || []) byCode.set(c.toUpperCase(), l);
+  }
+  for (const l of layout.locations) l.stock = [];
+  const unknown = new Set();
+  let placed = 0;
+  for (const r of rows) {
+    const l = byCode.get(r.loc);
+    if (!l) {
+      unknown.add(r.loc);
+      continue;
+    }
+    const s = l.stock.find((x) => x.sku === r.sku);
+    if (s) s.qty += r.qty;
+    else l.stock.push({ sku: r.sku, qty: r.qty });
+    placed++;
+  }
+  return { placed, unknown: [...unknown] };
+}
+
+/* ------------------------------------------------------------------ */
 /* Sample project                                                      */
 /* ------------------------------------------------------------------ */
 

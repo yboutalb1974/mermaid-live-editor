@@ -2,6 +2,8 @@
 import {
   DEFAULT_GENERATOR,
   DEFAULT_SETTINGS,
+  DEFAULT_WMS_IMPORT,
+  applyStock,
   SEQUENCE_MODES,
   abcClasses,
   applyMoves,
@@ -12,11 +14,14 @@ import {
   emptyLayout,
   fillSkus,
   generateRacks,
+  layoutFromWms,
   moveCurve,
   movePlan,
   naturalCompare,
   parseDemandCsv,
+  parseLocationSheet,
   parseOrdersCsv,
+  parseStockSheet,
   pickFaceCell,
   prepareLayout,
   sameFootprint,
@@ -131,6 +136,7 @@ function normalizeProject(p) {
         w: Math.max(1, Math.round(toNum(loc.w, 1))),
         d: Math.max(1, Math.round(toNum(loc.d, 1))),
         face: FACES[loc.face] ? loc.face : 'E',
+        ...(Array.isArray(loc.wms) ? { wms: loc.wms.map(String) } : {}),
         stock: (loc.stock || [])
           .filter((s) => s && s.sku)
           .map((s) => ({ sku: String(s.sku), qty: toNum(s.qty, 0) }))
@@ -945,6 +951,13 @@ function renderInspector() {
     <div class="panel-head"><h3>Ubicazione ${esc(loc.id)}</h3>${
     res ? `<span class="tag accent">${res.visits[loc.id] || 0} giri</span>` : ''
   }</div>
+    ${
+      loc.wms?.length
+        ? `<p class="hint">Ubicazioni WMS in questa posizione (${
+            loc.wms.length
+          } livelli): <span class="mono">${esc(loc.wms.join(' · '))}</span></p>`
+        : ''
+    }
     <label class="field"><span>Codice</span><input type="text" id="loc-id" data-lf="id" value="${esc(
       loc.id
     )}" /></label>
@@ -2109,6 +2122,284 @@ function readFile(input, cb) {
 }
 
 /* ------------------------------------------------------------------ */
+/* WMS import (Excel / CSV)                                            */
+/* ------------------------------------------------------------------ */
+
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+let xlsxPromise = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (!xlsxPromise) {
+    xlsxPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = XLSX_URL;
+      s.onload = () => resolve(window.XLSX);
+      s.onerror = () => {
+        xlsxPromise = null;
+        s.remove();
+        reject(
+          new Error(
+            'Impossibile caricare il lettore Excel: serve internet. In alternativa salva il foglio come CSV.'
+          )
+        );
+      };
+      document.head.append(s);
+    });
+  }
+  return xlsxPromise;
+}
+
+function csvRows(text) {
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+  const first = lines.find((l) => l.trim()) || '';
+  const sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ';' : ',';
+  return lines.map((l) => l.split(sep).map((c) => c.replace(/^"|"$/g, '').trim()));
+}
+
+// Reads a spreadsheet or CSV file into one array of rows per sheet.
+async function readSheets(file) {
+  const name = file.name.toLowerCase();
+  if (file.size > 20 * 1024 * 1024) throw new Error('File troppo grande (massimo 20 MB).');
+  if (name.endsWith('.csv') || name.endsWith('.txt')) {
+    return [{ name: file.name, rows: csvRows(await file.text()) }];
+  }
+  const XLSX = await loadXlsx();
+  const wb = XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: 'array' });
+  return wb.SheetNames.map((n) => ({
+    name: n,
+    rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
+  }));
+}
+
+async function onWmsFile(input) {
+  const f = input.files?.[0];
+  input.value = '';
+  if (!f) return;
+  notify(`Lettura di ${f.name}…`);
+  try {
+    const sheets = await readSheets(f);
+    let best = null;
+    for (const sh of sheets) {
+      const r = parseLocationSheet(sh.rows);
+      if (!best || r.locations.length > best.locations.length) best = { ...r, sheet: sh.name };
+    }
+    if (!best || best.locations.length === 0) {
+      notify(
+        'Nessuna ubicazione trovata. Servono le colonne Corsia/Aisle, Campata/Bay, Livello/Level, Posto/Bin, oppure codici come AR01C3.',
+        'error'
+      );
+      return;
+    }
+    state.wms = {
+      file: f.name,
+      sheet: best.sheet,
+      list: best.locations,
+      opts: { ...DEFAULT_WMS_IMPORT }
+    };
+    setTab('layout');
+    $('#wms-panel').open = true;
+    renderWmsImport();
+    $('#wms-panel').scrollIntoView({
+      behavior: reducedMotion() ? 'auto' : 'smooth',
+      block: 'start'
+    });
+    notify(
+      `${best.locations.length.toLocaleString('it-IT')} ubicazioni lette da «${
+        f.name
+      }». Controlla le misure e crea il layout.`
+    );
+  } catch (err) {
+    notify(err.message || 'Impossibile leggere il file.', 'error');
+  }
+}
+
+function renderWmsImport() {
+  const el = $('#wms-import');
+  const W = state.wms;
+  const stockPart = `
+    <div class="fieldset">
+      <h4>Giacenze per ubicazione</h4>
+      <p class="hint">Dice quale SKU sta in quale ubicazione del layout attivo. Colonne <span class="mono">Ubicazione</span> (codice WMS come AR01C3), <span class="mono">SKU</span> e <span class="mono">Qtà</span>. Sostituisce le giacenze del layout attivo.</p>
+      <pre class="code">Ubicazione;SKU;Qta
+AR01A1;ART-1043;24
+AR01C3;ART-0007;6</pre>
+      <div class="row">
+        <label class="btn small dark file-btn" for="file-stock">Importa giacenze (Excel/CSV)</label>
+        <input type="file" id="file-stock" accept=".xlsx,.xls,.csv,.txt" hidden />
+      </div>
+    </div>`;
+  if (!W) {
+    el.innerHTML = `
+      <p class="hint">Carica l'anagrafica ubicazioni esportata dal WMS (Excel o CSV) con le colonne Corsia/Aisle, Campata/Bay, Livello/Level e Posto/Bin, anche in più blocchi affiancati. Il file viene letto solo nel browser.</p>
+      <div class="row"><label class="btn small dark file-btn" for="file-wms">Scegli file ubicazioni</label></div>
+      ${stockPart}`;
+    return;
+  }
+  const o = W.opts;
+  const preview = layoutFromWms(W.list, o);
+  const levels = [...new Set(W.list.map((l) => l.level))].sort(naturalCompare);
+  const nf = (label, key, attrs, hint = '') =>
+    numField(label, 'wms-' + key, o[key], `data-wms="${key}" ${attrs}`, hint);
+  el.innerHTML = `
+    <p class="hint">«${esc(W.file)}»${
+    W.sheet ? `, foglio «${esc(W.sheet)}»` : ''
+  }: <b>${W.list.length.toLocaleString('it-IT')}</b> ubicazioni in <b>${
+    preview.aisles.length
+  }</b> corsie (${esc(preview.aisles.join(', '))}), <b>${levels.length}</b> livelli (${esc(
+    levels.join(', ')
+  )}) → <b>${preview.locations.length}</b> posizioni a terra. Pianta risultante: <b>${
+    preview.width
+  } × ${preview.depth} m</b>.</p>
+    <p class="hint">Il file non contiene misure: quelle sotto sono ipotesi da verificare sul posto. Ogni posizione a terra raccoglie tutti i suoi livelli; la campata 01 è dal lato dell'ingresso, le corsie consecutive sono schiena contro schiena. Griglia da 1 m.</p>
+    <div class="grid">
+      ${nf('Larghezza posto (m)', 'binWidth', 'min="1" max="5" step="1"', 'Lungo la corsia')}
+      ${nf('Profondità scaffale (m)', 'rackDepth', 'min="1" max="5" step="1"')}
+      ${nf('Corridoio (m)', 'walkway', 'min="1" max="10" step="1"', 'Tra i due lati')}
+      ${nf('Testata ingresso (m)', 'frontAisle', 'min="1" max="20" step="1"')}
+      ${nf('Fondo (m)', 'backAisle', 'min="0" max="20" step="1"')}
+      ${nf('Margine muri (m)', 'margin', 'min="0" max="10" step="1"')}
+      <label class="field"><span>Posti dispari</span>
+        <select id="wms-oddSide" data-wms="oddSide">
+          <option value="right" ${
+            o.oddSide === 'right' ? 'selected' : ''
+          }>Lato destro (Right Side)</option>
+          <option value="left" ${o.oddSide === 'left' ? 'selected' : ''}>Lato sinistro</option>
+        </select></label>
+      <label class="field"><span>Assegna SKU</span>
+        <select id="wms-fill" data-wms="fill">
+          <option value="none" ${
+            o.fill !== 'random' ? 'selected' : ''
+          }>Nessuno (importo le giacenze)</option>
+          <option value="random" ${
+            o.fill === 'random' ? 'selected' : ''
+          }>Catalogo a caso (solo prova)</option>
+        </select></label>
+    </div>
+    <label class="check"><input type="checkbox" id="wms-rev" data-wms="reverseAisles" ${
+      o.reverseAisles ? 'checked' : ''
+    } /> Inverti l'ordine delle corsie (${esc(
+    preview.aisles[preview.aisles.length - 1]
+  )} a sinistra)</label>
+    <div class="row">
+      <button type="button" class="btn primary" data-wms-act="create">Crea layout dal WMS</button>
+      <button type="button" class="btn ghost" data-wms-act="clear">Annulla</button>
+    </div>
+    ${stockPart}`;
+}
+
+function onWmsChange(e) {
+  const t = e.target;
+  if (t.id === 'file-stock') return onStockFile(t);
+  const k = t.dataset.wms;
+  if (!k || !state.wms) return;
+  const o = state.wms.opts;
+  if (t.type === 'checkbox') o[k] = t.checked;
+  else if (t.tagName === 'SELECT') o[k] = t.value;
+  else
+    o[k] = Math.max(
+      k === 'backAisle' || k === 'margin' ? 0 : 1,
+      Math.round(toNum(t.value, DEFAULT_WMS_IMPORT[k]))
+    );
+  renderWmsImport();
+}
+
+function createWmsLayout() {
+  const W = state.wms;
+  if (!W) return;
+  const g = layoutFromWms(W.list, W.opts);
+  const L = emptyLayout(`Magazzino · ${W.file.replace(/\.[^.]+$/, '')}`);
+  Object.assign(L, {
+    width: g.width,
+    depth: g.depth,
+    start: g.start,
+    end: { ...g.start },
+    sameEnd: true,
+    levels: g.levels,
+    rackHeight: Math.max(2, Math.round(g.levels * 0.5 * 2) / 2),
+    locations: g.locations
+  });
+  if (W.opts.fill === 'random') {
+    fillSkus(L.locations, state.project.demand, DEFAULT_GENERATOR.qtyPerSlot, Date.now() % 100000);
+  }
+  // The imported warehouse becomes the baseline; other layouts (e.g. the sample) leave the
+  // comparison so their numbers are never mixed with the real site.
+  const others = state.project.layouts.filter((x) => x.include !== false).length;
+  for (const x of state.project.layouts) x.include = false;
+  L.include = true;
+  state.project.layouts.unshift(L);
+  state.activeId = L.id;
+  state.selected = null;
+  state.found = null;
+  state.wms = null;
+  if (others) {
+    setTimeout(
+      () =>
+        notify(
+          `«${L.name}» è ora la baseline. Gli altri ${others} layout sono esclusi dal confronto: riattivali dalle schede in alto se servono.`
+        ),
+      5200
+    );
+  }
+  $('#wms-panel').open = true;
+  notify(
+    W.opts.fill === 'random'
+      ? `Creato «${L.name}» con ${L.locations.length} posizioni. SKU messi a caso: utile per provare, non per decidere. Importa le giacenze reali qui sotto.`
+      : `Creato «${L.name}» con ${L.locations.length} posizioni vuote. Ora importa le giacenze (Ubicazione, SKU, Qtà) qui sotto.`
+  );
+  changed(['layout', 'geometry', 'generator', 'settings', 'demand']);
+  renderWmsImport();
+}
+
+async function onStockFile(input) {
+  const f = input.files?.[0];
+  input.value = '';
+  if (!f) return;
+  try {
+    const sheets = await readSheets(f);
+    let rows = [];
+    for (const sh of sheets) {
+      const r = parseStockSheet(sh.rows);
+      if (r.length > rows.length) rows = r;
+    }
+    if (!rows.length) {
+      notify(
+        'Nessuna riga valida. Servono le colonne Ubicazione e SKU (Qtà facoltativa).',
+        'error'
+      );
+      return;
+    }
+    const L = active();
+    const res = applyStock(L, rows);
+    const known = new Set(state.project.demand.map((d) => d.sku));
+    let added = 0;
+    for (const loc of L.locations) {
+      for (const s of loc.stock) {
+        if (!known.has(s.sku)) {
+          state.project.demand.push({ sku: s.sku, weight: 1 });
+          known.add(s.sku);
+          added++;
+        }
+      }
+    }
+    notify(
+      `${res.placed.toLocaleString('it-IT')} giacenze collocate in «${L.name}».` +
+        (res.unknown.length
+          ? ` ${res.unknown.length} codici non trovati nel layout (es. ${res.unknown
+              .slice(0, 3)
+              .join(', ')}).`
+          : '') +
+        (added
+          ? ` ${added} SKU nuovi aggiunti al catalogo con peso 1: importa i pesi reali o gli ordini storici.`
+          : ''),
+      res.unknown.length ? 'error' : 'info'
+    );
+    changed(['layout', 'demand']);
+  } catch (err) {
+    notify(err.message || 'Impossibile leggere il file.', 'error');
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Wiring                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -2129,6 +2420,7 @@ function renderAll() {
   renderLayoutList();
   renderGeometry();
   renderGenerator();
+  renderWmsImport();
   renderMap();
   renderInspector();
   renderRouteBar();
@@ -2166,7 +2458,27 @@ function wire() {
       'application/json'
     )
   );
-  $('#file-project').addEventListener('change', (e) =>
+  $('#file-wms').addEventListener('change', (e) => onWmsFile(e.target));
+  $('#wms-import').addEventListener('change', onWmsChange);
+  $('#wms-import').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-wms-act]');
+    if (!b) return;
+    if (b.dataset.wmsAct === 'create') createWmsLayout();
+    else {
+      state.wms = null;
+      renderWmsImport();
+    }
+  });
+  $('#file-project').addEventListener('change', (e) => {
+    const f = e.target.files?.[0];
+    if (f && /\.(xlsx|xls|csv)$/i.test(f.name)) {
+      e.target.value = '';
+      notify(
+        '«Importa progetto» accetta solo il file JSON esportato da questo strumento. Per un Excel di ubicazioni usa «Importa ubicazioni (Excel/CSV)».',
+        'error'
+      );
+      return;
+    }
     readFile(e.target, (text) => {
       try {
         loadProject(
@@ -2176,8 +2488,8 @@ function wire() {
       } catch (err) {
         notify('Progetto non valido: ' + err.message, 'error');
       }
-    })
-  );
+    });
+  });
 
   // Layout list
   $('#layout-list').addEventListener('click', (e) => {
