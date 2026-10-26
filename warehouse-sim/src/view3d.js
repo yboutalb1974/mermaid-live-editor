@@ -119,11 +119,43 @@ export function createView3D(container, { onPick } = {}) {
     render();
   }
 
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const pickMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+
+  // Frees what a scene rebuild created; the shared box and pick material are kept.
   function disposeGroup(g) {
     g.traverse((o) => {
-      o.geometry?.dispose();
-      if (o.material) for (const m of [].concat(o.material)) m.dispose();
+      if (o.geometry && o.geometry !== unitBox) o.geometry.dispose();
+      for (const m of [].concat(o.material || [])) {
+        if (m === pickMat) continue;
+        m.map?.dispose();
+        m.dispose();
+      }
     });
+  }
+
+  // Text lying flat on the floor, drawn on a canvas texture.
+  function floorLabel(text, x, z, size, color) {
+    const c = document.createElement('canvas');
+    const fs = 96;
+    const font = `700 ${fs}px "Barlow Condensed", "Arial Narrow", sans-serif`;
+    let ctx = c.getContext('2d');
+    ctx.font = font;
+    c.width = Math.ceil(ctx.measureText(text).width) + 24;
+    c.height = Math.round(fs * 1.25);
+    ctx = c.getContext('2d');
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 12, c.height / 2);
+    const tex = new THREE.CanvasTexture(c);
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry((size * c.width) / c.height, size),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+    );
+    plane.rotation.x = -Math.PI / 2;
+    plane.position.set(x, 0.02, z);
+    content.add(plane);
   }
 
   // data: { layout, selected, heat: {locId: 0..1} | null, routeCells: [{x,y}] | null, stops: [{x,y}] }
@@ -185,98 +217,171 @@ export function createView3D(container, { onPick } = {}) {
       content.add(m);
     }
 
-    // Racks: a box per location plus outline and shelf-level lines.
+    // Pallet racking: blue uprights at bay boundaries, orange beams on every level and a
+    // pallet with cartons on each level of an occupied position. Loads mean "position in
+    // use": stock is known per floor position, not per level.
     const height = Math.max(0.5, L.rackHeight || 3);
     const levels = Math.max(1, Math.round(L.levels || 4));
-    const box = new THREE.BoxGeometry(1, 1, 1);
-    const edgeBox = new THREE.EdgesGeometry(box);
-    const lineMat = new THREE.LineBasicMaterial({ color: col.steel });
-    const selLineMat = new THREE.LineBasicMaterial({ color: col.sel });
+    const levelH = height / levels;
     const white = new THREE.Color(0xffffff);
+    const RACK = {
+      upright: new THREE.Color('#2f62b4'),
+      beam: new THREE.Color('#ef7b22'),
+      pallet: new THREE.Color('#a8794a'),
+      carton: new THREE.Color('#d6a467')
+    };
     const catColor = {
       A: col.sel,
-      B: col.steel.clone().lerp(white, 0.55),
-      C: col.empty,
-      moved: col.route.clone().lerp(white, 0.4)
+      B: col.steel.clone().lerp(white, 0.45),
+      C: new THREE.Color('#c9d0cc'),
+      moved: col.route.clone().lerp(white, 0.15)
     };
-    const shelf = [];
-    const faceMarks = [];
+    const alongZ = (loc) => loc.face === 'E' || loc.face === 'W';
+    const bayKey = (id) => String(id).replace(/-\d+$/, '');
+    const startKey = (loc, at) =>
+      alongZ(loc) ? `${loc.face}|${loc.x}|${loc.w}|${at}` : `${loc.face}|${loc.y}|${loc.d}|${at}`;
+    const byStart = new Map();
+    const byEnd = new Map();
     for (const loc of L.locations) {
-      const empty = !loc.stock || loc.stock.length === 0;
-      let c = empty ? col.empty : col.rack;
+      byStart.set(startKey(loc, alongZ(loc) ? loc.y : loc.x), loc);
+      byEnd.set(startKey(loc, alongZ(loc) ? loc.y + loc.d : loc.x + loc.w), loc);
+    }
+
+    const uprights = [];
+    const beams = [];
+    const pallets = [];
+    const cartons = [];
+    const faceMarks = [];
+    const U = 0.08;
+    const selected = [];
+    for (const loc of L.locations) {
+      const z = alongZ(loc);
+      const len = z ? loc.d : loc.w;
+      const dep = z ? loc.w : loc.d;
+      const a0 = z ? loc.y : loc.x;
+      const c0 = z ? loc.x : loc.y;
+      // Position in scene axes from (along, across, height).
+      const P = (al, ac, y) => (z ? [c0 + ac, y, a0 + al] : [a0 + al, y, c0 + ac]);
+      const S = (sl, sc, sy) => (z ? [sc, sy, sl] : [sl, sy, sc]);
+      const prev = byEnd.get(startKey(loc, a0));
+      const next = byStart.get(startKey(loc, a0 + len));
+      const ends = [];
+      if (!prev || bayKey(prev.id) !== bayKey(loc.id)) ends.push(0);
+      if (!next) ends.push(len);
+      for (const e of ends) {
+        for (const ac of [U / 2, dep - U / 2]) {
+          uprights.push({ p: P(e, ac, height / 2), s: S(U, U, height) });
+        }
+      }
+      for (let k = 1; k <= levels; k++) {
+        for (const ac of [U / 2, dep - U / 2]) {
+          beams.push({ p: P(len / 2, ac, k * levelH - 0.05), s: S(len, 0.06, 0.1) });
+        }
+      }
+      const occupied = loc.stock && loc.stock.length > 0;
       const p = data.paint?.[loc.id];
+      let c = RACK.carton;
       if (data.paint) {
         if (p?.t !== undefined) c = col.heatLo.clone().lerp(col.heatHi, p.t);
         else if (p?.cat) c = catColor[p.cat] || c;
       }
       const isSel = loc.id === data.selected || !!data.found?.has(loc.id);
-      const mesh = new THREE.Mesh(
-        box,
-        new THREE.MeshLambertMaterial({
-          color: c,
-          emissive: isSel ? col.sel : 0x000000,
-          emissiveIntensity: isSel ? 0.35 : 0
-        })
-      );
-      mesh.scale.set(loc.w * 0.96, height, loc.d * 0.96);
-      mesh.position.set(loc.x + loc.w / 2, height / 2, loc.y + loc.d / 2);
-      mesh.userData.locId = loc.id;
-      content.add(mesh);
-      rackMeshes.push(mesh);
-      const edges = new THREE.LineSegments(edgeBox, isSel ? selLineMat : lineMat);
-      edges.scale.copy(mesh.scale);
-      edges.position.copy(mesh.position);
-      content.add(edges);
-      const x0 = loc.x + loc.w * 0.02;
-      const x1 = loc.x + loc.w * 0.98;
-      const z0 = loc.y + loc.d * 0.02;
-      const z1 = loc.y + loc.d * 0.98;
-      for (let k = 1; k < levels; k++) {
-        const y = (height * k) / levels;
-        shelf.push(
-          x0,
-          y,
-          z0,
-          x1,
-          y,
-          z0,
-          x1,
-          y,
-          z0,
-          x1,
-          y,
-          z1,
-          x1,
-          y,
-          z1,
-          x0,
-          y,
-          z1,
-          x0,
-          y,
-          z1,
-          x0,
-          y,
-          z0
-        );
+      if (isSel) {
+        c = col.sel;
+        selected.push(loc);
       }
+      if (occupied) {
+        for (let i = 0; i < levels; i++) {
+          const base = i * levelH;
+          const ch = Math.max(0.15, Math.min(levelH * 0.72, levelH - 0.28));
+          pallets.push({ p: P(len / 2, dep / 2, base + 0.07), s: S(len * 0.82, dep * 0.86, 0.12) });
+          cartons.push({
+            p: P(len / 2, dep / 2, base + 0.13 + ch / 2),
+            s: S(len * 0.76, dep * 0.8, ch),
+            c
+          });
+        }
+      }
+      // Invisible box over the whole bay position, used to pick it with a click.
+      const pick = new THREE.Mesh(unitBox, pickMat);
+      pick.scale.set(loc.w, height, loc.d);
+      pick.position.set(loc.x + loc.w / 2, height / 2, loc.y + loc.d / 2);
+      pick.userData.locId = loc.id;
+      content.add(pick);
+      rackMeshes.push(pick);
       // Pick face: a strip on the floor in front of the open side.
       const f = { N: [0, -1], S: [0, 1], W: [-1, 0], E: [1, 0] }[loc.face] || [1, 0];
-      const fx = loc.x + loc.w / 2 + (f[0] * (loc.w + 0.5)) / 2;
-      const fz = loc.y + loc.d / 2 + (f[1] * (loc.d + 0.5)) / 2;
-      faceMarks.push({ x: fx, z: fz, w: f[0] ? 0.2 : loc.w * 0.7, d: f[1] ? 0.2 : loc.d * 0.7 });
+      faceMarks.push({
+        x: loc.x + loc.w / 2 + (f[0] * (loc.w + 0.35)) / 2,
+        z: loc.y + loc.d / 2 + (f[1] * (loc.d + 0.35)) / 2,
+        w: f[0] ? 0.12 : loc.w * 0.8,
+        d: f[1] ? 0.12 : loc.d * 0.8
+      });
     }
-    if (shelf.length) {
-      const sg = new THREE.BufferGeometry();
-      sg.setAttribute('position', new THREE.Float32BufferAttribute(shelf, 3));
-      content.add(new THREE.LineSegments(sg, lineMat));
-    }
+
+    const dummy = new THREE.Object3D();
+    const instanced = (items, color) => {
+      const mat = new THREE.MeshLambertMaterial({ color: color || 0xffffff });
+      const m = new THREE.InstancedMesh(unitBox, mat, Math.max(1, items.length));
+      m.count = items.length;
+      items.forEach((it, i) => {
+        dummy.position.set(...it.p);
+        dummy.scale.set(...it.s);
+        dummy.updateMatrix();
+        m.setMatrixAt(i, dummy.matrix);
+        if (!color) m.setColorAt(i, it.c);
+      });
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      content.add(m);
+    };
+    instanced(uprights, RACK.upright);
+    instanced(beams, RACK.beam);
+    instanced(pallets, RACK.pallet);
+    if (cartons.length) instanced(cartons, null);
+
     const faceMat = new THREE.MeshBasicMaterial({ color: col.steel });
     for (const m of faceMarks) {
-      const p = new THREE.Mesh(new THREE.PlaneGeometry(m.w, m.d), faceMat);
-      p.rotation.x = -Math.PI / 2;
-      p.position.set(m.x, 0.01, m.z);
-      content.add(p);
+      const strip = new THREE.Mesh(new THREE.PlaneGeometry(m.w, m.d), faceMat);
+      strip.rotation.x = -Math.PI / 2;
+      strip.position.set(m.x, 0.01, m.z);
+      content.add(strip);
+    }
+    const selLine = new THREE.LineBasicMaterial({ color: col.sel });
+    for (const loc of selected) {
+      const e = new THREE.LineSegments(new THREE.EdgesGeometry(unitBox), selLine);
+      e.scale.set(loc.w + 0.1, height + 0.1, loc.d + 0.1);
+      e.position.set(loc.x + loc.w / 2, height / 2, loc.y + loc.d / 2);
+      content.add(e);
+    }
+
+    // Aisle names painted on the floor in front of each aisle (letters of the location code).
+    const groups = new Map();
+    for (const loc of L.locations) {
+      const key = (String(loc.id).match(/^[A-Za-z]+/) || [''])[0];
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(loc);
+    }
+    if (groups.size <= 40) {
+      for (const [name, list] of groups) {
+        const z = alongZ(list[0]);
+        const minA = Math.min(...list.map((l) => (z ? l.y : l.x)));
+        if (minA < 1.2) continue;
+        // Centre of the walkway: between the racks that face it from either side.
+        const lo = list.filter((l) => l.face === (z ? 'E' : 'S'));
+        const hi = list.filter((l) => l.face === (z ? 'W' : 'N'));
+        let cx;
+        if (lo.length && hi.length) {
+          const edge = Math.max(...lo.map((l) => (z ? l.x + l.w : l.y + l.d)));
+          cx = (edge + Math.min(...hi.map((l) => (z ? l.x : l.y)))) / 2;
+        } else {
+          cx = list.reduce((acc, l) => acc + (z ? l.x + l.w / 2 : l.y + l.d / 2), 0) / list.length;
+        }
+        const size = Math.min(1.6, Math.max(0.8, minA * 0.45));
+        if (z) floorLabel(name, cx, minA - size * 0.75, size, '#172022');
+        else floorLabel(name, minA - size * 0.75, cx, size, '#172022');
+      }
     }
 
     // Start and end.
@@ -287,6 +392,7 @@ export function createView3D(container, { onPick } = {}) {
     );
     startMesh.position.set(s.x + 0.5, 0.15, s.y + 0.5);
     content.add(startMesh);
+    floorLabel('Partenza', s.x + 2.6, s.y + 0.5, 0.7, '#2e7d4f');
     if (!L.sameEnd) {
       const e = L.end;
       const endMesh = new THREE.Mesh(
@@ -295,6 +401,7 @@ export function createView3D(container, { onPick } = {}) {
       );
       endMesh.position.set(e.x + 0.5, 0.15, e.y + 0.5);
       content.add(endMesh);
+      floorLabel('Arrivo', e.x + 2.3, e.y + 0.5, 0.7, '#b3261e');
     }
 
     // Sample route as a tube a little above the floor, with stop markers.
@@ -423,6 +530,8 @@ export function createView3D(container, { onPick } = {}) {
     ro.disconnect();
     if (frame) cancelAnimationFrame(frame);
     disposeGroup(content);
+    unitBox.dispose();
+    pickMat.dispose();
     renderer.dispose();
     el.remove();
   }
